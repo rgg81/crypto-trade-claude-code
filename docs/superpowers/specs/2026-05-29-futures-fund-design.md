@@ -86,7 +86,18 @@ Spine: **narrow uni-modal analysts** (less hallucination) → **one accountable 
 | — | **Reflector** *(async, post-close)* | Two-phase journal patch + lesson generation; low-level (read) vs high-level (action) lessons; prose→narrative agents, numeric deltas→quant/risk | journal patches + lessons |
 | — | **Light Risk Monitor** *(between ticks)* | Cheap/no-debate check of drawdown, liq distance, funding, stale feeds → can trip circuit breaker / cap conviction | status + optional HALT/flatten |
 
-Each agent has a markdown **role file** in `agents/`. Per-symbol pods (stages 1–4) run in parallel across symbols; a cross-symbol bus lets the BTC regime inform alt reads.
+Each agent has a markdown **role file** in `agents/`. A cross-symbol bus lets the BTC regime inform alt reads.
+
+### 3.1 Dispatch granularity & funnel (cost control)
+
+A pod-per-symbol fan-out (≈10 × 4 analysts = ~40 analyst subagents per cycle, before debate) is too token-heavy for a 24/7 loop. Instead the cycle is a **funnel** with granularity matched to stage:
+
+- **Stages 1 (analysts):** **one subagent per analyst role**, each processing the *entire* shortlist in a single structured pass (4 analyst subagents/cycle, not 40). Output is a per-symbol row keyed by symbol.
+- **Screen:** a deterministic + Research-Manager screen ranks the shortlist by combined analyst conviction/agreement and keeps only the **top N (default 3–5)** symbols for full debate. The rest are logged (and shadow-watched) but skip the expensive stage.
+- **Stages 2–4 (debate → judge → trader):** **per-symbol pods, parallel**, only for the screened survivors. This is where depth matters, so the cost is spent where it pays.
+- **Stages 5–6 (risk gate, portfolio manager):** run once over the full proposal set.
+
+This keeps a full cycle at roughly 4 analyst passes + (3–5)×(debate+judge+trader) + 1 risk + 1 PM subagent invocations — bounded and tunable via the screen width `N`.
 
 ---
 
@@ -98,8 +109,8 @@ Mirrors `solana-storm`'s discipline; every phase persists an artifact ("no silen
 1. **Audit & Reflect** — for positions closed since the last tick, fetch realized PnL net of costs; patch the journal (Phase-2 fields); update per-agent hit-rate; generate per-cycle lessons.
 2. **Regime + Portfolio Health** — compute market regime (vendored `regime-detection`) for BTC and per candidate; compute portfolio health (heat, drawdown-from-peak, recent hit-rate). **This sets the adaptive risk caps for the cycle.**
 3. **Watcher** — nominate ~10 symbols (long/short), diversification- & liquidity-filtered.
-4. **Analyst pods** — 4 analysts per symbol, parallel across symbols → reports (features via vendored `feature-engineering`).
-5. **Debate + Research Manager** — bull/bear (regime-filtered lessons injected) → 5-tier plan per symbol.
+4. **Analyst pass + screen** — 4 analyst roles, each processing the whole shortlist in one pass (features via vendored `feature-engineering`); a screen keeps the **top N (3–5)** by conviction/agreement for full debate (rest logged + shadow-watched). See §3.1.
+5. **Debate + Research Manager** — per screened symbol: bull/bear (regime-filtered lessons injected) → 5-tier plan.
 6. **Trader proposals** — concrete orders per long-listed plan.
 7. **Risk gate** — deterministic per-trade + portfolio risk; adaptive caps; CVaR alarm; approve/resize/veto.
 8. **Portfolio Manager** — final book consolidation.
