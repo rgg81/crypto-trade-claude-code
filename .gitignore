@@ -1,0 +1,16 @@
+# Runtime state & secrets — never commit
+state/
+.env
+*.key
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+
+# OS / editor
+.DS_Store
+*.swp
