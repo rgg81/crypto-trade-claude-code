@@ -26,6 +26,7 @@ Run: `uv run python scripts/screen_cli.py --cycle N --top 5`
 It writes `state/cycle/N/screened.json` (the top symbols worth debating). Symbols that don't survive are logged + shadow-watched, not debated.
 
 ### Phase 5 — Debate + Research Manager (per screened symbol)
+   Before the debate, run `uv run python scripts/retrieve_lessons_cli.py --cycle N --regime <symbol's quadrant from the brief> --tags <setup tags> --k 5` and inject the returned `state/cycle/N/lessons.json` (top 3-7 VALIDATED/relevant lessons) into the Bull, Bear, and Trader prompts — the team must reason WITH its past lessons.
 For each screened symbol:
 1. Dispatch **Bull** (opus, `agents/bull.md`) with that symbol's analyst reports + retrieved lessons → strongest long thesis.
 2. Dispatch **Bear** (opus, `agents/bear.md`) with the same + the Bull's thesis → strongest short/flat case, rebutting the Bull.
@@ -40,7 +41,9 @@ Run: `uv run python scripts/gate_execute_cli.py --cycle N`
 This applies the **adaptive risk gate** (regime × portfolio-health caps, liq-distance, RR, heat), the **gross-heat cap + CVaR de-risk** consolidation, reconciles vs open positions, executes (paper or live per config), and journals every decision. It writes `state/cycle/N/report.json`. **You cannot override this gate** — it is the survival mechanism (see `agents/risk_manager.md`, `agents/portfolio_manager.md`).
 
 ### Phase 11 — Reflect + surface
-Run: `uv run python scripts/reflect_cli.py --cycle N` → `state/cycle/N/reflection_input.json` (winners vs losers). If there are closed trades, dispatch the **Reflector** (opus, `agents/reflector.md`) with that payload → CANDIDATE lessons; the orchestrator records them (lessons are only *proposed* now — promotion to VALIDATED is gated by the eval harness in Phase C). Finally, present the `report.json` to the user: actions taken, current book, equity, risk posture.
+Run: `uv run python scripts/reflect_cli.py --cycle N` → `state/cycle/N/reflection_input.json` (winners vs losers). If there are closed trades, dispatch the **Reflector** (opus, `agents/reflector.md`) with that payload → CANDIDATE lessons; the orchestrator records them (lessons are only *proposed* now — promotion to VALIDATED is gated by the eval harness in Phase C).
+   The Reflector may also confirm/demote/retire EXISTING lessons based on the closed trades: for each, run `uv run python scripts/promote_lesson_cli.py --id <lesson_id> --action confirm|demote|retire`. A lesson reaching the confirmation threshold becomes VALIDATED (a standing rule); stale or regime-mismatched VALIDATED lessons must be demoted aggressively so vetoes don't ossify.
+Finally, present the `report.json` to the user: actions taken, current book, equity, risk posture.
 
 ## Subagent dispatch rules
 - Inject `MISSION.md` verbatim at the top of EVERY subagent prompt.
@@ -49,5 +52,11 @@ Run: `uv run python scripts/reflect_cli.py --cycle N` → `state/cycle/N/reflect
 - Analyst, Research Manager, and Trader subagents MUST set the `symbol` field of their output to the brief's `exchange_id` (the raw id, e.g. `BTCUSDT`), NOT the unified symbol. (The gate also normalizes unified->raw defensively, but emit the raw id.)
 - Retrieve relevant lessons for the debate/trader prompts (regime-filtered, top 3-7) so the team learns from the past. (a lesson-retrieval CLI is wired in Phase B3; until then proceed without injected lessons).
 
-## Self-healing (see B3 / spec §5)
-If any `scripts/*` call errors: capture it to `state/error-log.jsonl`, diagnose the root cause (use systematic-debugging), fix the code, verify, commit, and append the repair to `memory/repair-journal.md` — then resume. NEVER weaken a risk limit or the execution path to make an error disappear; if you cannot fix it safely, set the HALT flag and surface.
+## Self-healing (spec §5)
+If any `scripts/*` call errors:
+1. Log it: append the error (phase, command, message, traceback) to `state/error-log.jsonl` (use `futures_fund.repair.log_error`).
+2. Diagnose the ROOT cause with the systematic-debugging skill — never guess-patch.
+3. Fix the code. **GUARDRAIL:** a fix to any protected module (`futures_fund.repair.is_protected` → risk_gate, executor, exits, consolidation, policy, liquidation, sizing, cycle) may NEVER weaken a risk limit, disable a circuit breaker, or bypass the execution safety path to make the error go away. The FULL test suite (`uv run pytest`) must pass before you commit any fix.
+4. Verify (re-run the failed step + the suite), commit the fix on a branch, and append the repair (symptom → root cause → fix → verification) to `memory/repair-journal.md` via `futures_fund.repair.record_repair`.
+5. Resume the cycle from the failed phase, or degrade safely (cap conviction / skip the affected symbol).
+If you cannot fix it safely, set the HALT flag (`futures_fund.state.set_halt`) and surface for human review — bad trades are worse than a paused desk.
