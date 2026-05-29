@@ -8,6 +8,7 @@ def test_ensure_creates_all_dirs_and_seed_files(tmp_path):
     assert paths["beliefs"].exists() and paths["beliefs"].name == "beliefs.md"
     assert paths["lessons"].exists() and paths["lessons"].name == "lessons.md"
     assert paths["playbook"].exists() and paths["playbook"].name == "playbook.md"
+    assert paths["repair_journal"].exists() and paths["repair_journal"].name == "repair-journal.md"
     # seed files are non-empty (have a heading)
     assert paths["beliefs"].read_text().strip().startswith("#")
 

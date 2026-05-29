@@ -4,7 +4,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from futures_fund.models import Direction
 
@@ -22,6 +22,14 @@ class Position(BaseModel):
     opened_cycle: int
     opened_ts: datetime
     decision_id: str | None = None
+
+    @model_validator(mode="after")
+    def _check_stop_side(self) -> Position:
+        if self.direction == "long" and self.stop >= self.entry:
+            raise ValueError("long stop must be below entry")
+        if self.direction == "short" and self.stop <= self.entry:
+            raise ValueError("short stop must be above entry")
+        return self
 
 
 class AccountState(BaseModel):

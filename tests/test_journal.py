@@ -63,3 +63,19 @@ def test_decision_model_allows_extra_agent_fields():
                  bull_thesis="...", some_future_field=123)
     dumped = d.model_dump()
     assert dumped["bull_thesis"] == "..." and dumped["some_future_field"] == 123
+
+
+def test_patch_cross_month_boundary(tmp_path):
+    # opened in April...
+    did = append_decision(tmp_path, _decision(ts=datetime(2026, 4, 30, 23, 0, tzinfo=UTC)))
+    assert (tmp_path / "episodic" / "journal-2026-04.jsonl").exists()
+    # ...closed in May (different month): patch must rewrite the APRIL file, not create May
+    ok = patch_outcome(tmp_path, did, {
+        "exit_ts": datetime(2026, 5, 1, 2, 0, tzinfo=UTC),
+        "realized_pnl": 55.0, "prediction_correct": True,
+    })
+    assert ok is True
+    assert not (tmp_path / "episodic" / "journal-2026-05.jsonl").exists()
+    rec = next(r for r in read_all_decisions(tmp_path) if r["id"] == did)
+    assert rec["realized_pnl"] == 55.0
+    assert rec["rationale"] == "momentum breakout"  # Phase-1 preserved across the patch

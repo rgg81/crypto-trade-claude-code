@@ -13,8 +13,9 @@ from futures_fund.state import (
 
 
 def _pos(symbol="BTCUSDT", direction="long"):
+    stop = 95.0 if direction == "long" else 105.0
     return Position(
-        symbol=symbol, direction=direction, qty=0.5, entry=100.0, stop=95.0,
+        symbol=symbol, direction=direction, qty=0.5, entry=100.0, stop=stop,
         take_profits=[115.0], leverage=5.0, margin=10.0, liq_price=82.0,
         opened_cycle=1, opened_ts=datetime(2026, 5, 29, tzinfo=UTC),
         decision_id="abc",

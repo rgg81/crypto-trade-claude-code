@@ -30,6 +30,10 @@ class Decision(BaseModel):
     r_multiple: float | None = None
     funding_at_entry: float | None = None
     regime: str | None = None
+    setup: str | None = None
+    alternatives_rejected: list[str] = Field(default_factory=list)
+    key_assumptions: list[str] = Field(default_factory=list)
+    falsifiable_prediction: str | None = None
     confidence: float | None = None
     rationale: str | None = None
     dominant_signal: str | None = None
@@ -44,7 +48,7 @@ class Decision(BaseModel):
     prediction_correct: bool | None = None
     low_level_lesson: str | None = None
     high_level_lesson: str | None = None
-    importance: int | None = None
+    importance_1_10: int | None = None
 
 
 def _episodic_dir(memory_dir) -> Path:
@@ -73,6 +77,8 @@ def _all_files(memory_dir) -> list[Path]:
 
 
 def read_all_decisions(memory_dir) -> list[dict]:
+    """All decision records as raw dicts. NOTE: datetime fields (ts, exit_ts) are ISO-8601
+    STRINGS here, not datetime objects — call Decision.model_validate(r) for typed access."""
     out: list[dict] = []
     for f in _all_files(memory_dir):
         for line in f.read_text().splitlines():
@@ -99,6 +105,7 @@ def patch_outcome(memory_dir, decision_id: str, outcome: dict) -> bool:
                 r.clear()
                 r.update(json.loads(merged.model_dump_json()))
                 hit = True
+                break  # ids are unique; stop scanning this file
         if hit:
             f.write_text("".join(json.dumps(r) + "\n" for r in records))
             return True

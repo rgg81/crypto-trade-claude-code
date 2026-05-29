@@ -10,6 +10,8 @@ _SEED = {
         "hard vetoes; demote aggressively when a regime shifts.\n"
     ),
     "playbook": "# Playbook\n\nThe team's standing trading rules (procedural memory).\n",
+    "repair_journal": "# Repair Journal\n\nOrchestrator code-fix audit trail "
+                      "(symptom -> root cause -> fix -> verification).\n",
 }
 
 
@@ -23,6 +25,7 @@ def memory_paths(memory_dir) -> dict[str, Path]:
         "beliefs": root / "semantic" / "beliefs.md",
         "playbook": root / "procedural" / "playbook.md",
         "hitrate": root / "hitrate",
+        "repair_journal": root / "repair-journal.md",
     }
 
 
