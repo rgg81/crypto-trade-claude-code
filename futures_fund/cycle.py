@@ -178,6 +178,8 @@ def execute_proposals(  # noqa: PLR0912
     save_account(state_dir, account)
     save_positions(state_dir, keep)
     report["equity"] = final_health.equity
+    from futures_fund.equity_log import record_equity
+    record_equity(state_dir, now, final_health.equity, cycle_no)
     return report
 
 
