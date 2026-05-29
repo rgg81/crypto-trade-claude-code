@@ -30,3 +30,17 @@ def test_shadow_outcome_no_trigger():
     entry = {"symbol": "BTCUSDT", "direction": "long", "entry": 100.0, "stop": 95.0,
              "take_profits": [115.0]}
     assert shadow_outcome(entry, bar_high=108.0, bar_low=98.0)["hit"] is None
+
+
+def test_shadow_outcome_short_would_have_stopped_out():
+    entry = {"symbol": "BTCUSDT", "direction": "short", "entry": 100.0, "stop": 105.0,
+             "take_profits": [85.0]}
+    out = shadow_outcome(entry, bar_high=106.0, bar_low=99.0)
+    assert out["hit"] == "stop" and out["r_multiple"] < 0 and out["veto_saved"] is True
+
+
+def test_shadow_outcome_short_would_have_won():
+    entry = {"symbol": "BTCUSDT", "direction": "short", "entry": 100.0, "stop": 105.0,
+             "take_profits": [85.0]}
+    out = shadow_outcome(entry, bar_high=101.0, bar_low=84.0)
+    assert out["hit"] == "take_profit" and out["r_multiple"] > 0 and out["veto_saved"] is False
