@@ -135,3 +135,24 @@ def retire_lesson(memory_dir, lesson_id: str) -> bool:
 def validated_lessons(memory_dir) -> list[Lesson]:
     """The VALIDATED lessons — these act as hard vetoes / standing rules for the team."""
     return [lz for lz in read_lessons(memory_dir) if lz.state == "validated"]
+
+
+def statistically_promote(memory_dir, lesson_id: str, *, dsr_pvalue: float,
+                          promote_threshold: int = 5, dsr_threshold: float = 0.95) -> bool:
+    """Confirm a lesson, but only allow CANDIDATE->VALIDATED promotion when the desk's edge is
+    statistically proven (DSR p-value >= threshold). Below the gate the confirmation still
+    counts, but the lesson stays CANDIDATE — the statistical layer over B3's count-based rule
+    (spec §6). Returns True if the lesson was found."""
+    lessons = read_lessons(memory_dir)
+    hit = False
+    for i, lz in enumerate(lessons):
+        if lz.id == lesson_id:
+            c = lz.confirmations + 1
+            promote = (lz.state == "candidate" and c >= promote_threshold
+                       and dsr_pvalue >= dsr_threshold)
+            lessons[i] = lz.model_copy(update={"confirmations": c,
+                                               "state": "validated" if promote else lz.state})
+            hit = True
+    if hit:
+        _write_all(memory_dir, lessons)
+    return hit
