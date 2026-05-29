@@ -1,0 +1,3 @@
+{"agent": "news", "symbol": "BTCUSDT", "stance": "bullish", "confidence": 0.55,
+ "key_points": ["spot ETF net inflows reported", "no adverse regulatory headlines"],
+ "signals": {"catalyst_count": 2, "risk_off_flag": 0}}

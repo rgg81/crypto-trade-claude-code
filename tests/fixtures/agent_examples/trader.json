@@ -1,0 +1,4 @@
+{"symbol": "BTCUSDT", "direction": "long", "entry": 73500.0, "stop": 71800.0,
+ "take_profits": [76900.0], "atr": 850.0, "confidence": 0.7, "horizon_hours": 8,
+ "rationale": "long per RM plan; 2x ATR stop, 2R target; entry on confirmation of trend continuation",
+ "confirmation": true}

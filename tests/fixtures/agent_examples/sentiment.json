@@ -1,0 +1,3 @@
+{"agent": "sentiment", "symbol": "BTCUSDT", "stance": "neutral", "confidence": 0.5,
+ "key_points": ["Fear&Greed 61 (greed) - mild contrarian caution", "macro: DXY soft, yields stable"],
+ "signals": {"fear_greed": 61, "dxy_trend": -1, "social_attention": 0.4}}

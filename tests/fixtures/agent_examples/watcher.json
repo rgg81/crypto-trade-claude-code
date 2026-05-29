@@ -1,0 +1,5 @@
+{"candidates": [
+  {"symbol": "BTC/USDT:USDT", "lean": "long", "rationale": "leading the risk-on move; clean uptrend", "score": 0.82, "correlation_group": "majors"},
+  {"symbol": "ETH/USDT:USDT", "lean": "long", "rationale": "following BTC, ETF flows", "score": 0.71, "correlation_group": "majors"},
+  {"symbol": "SOL/USDT:USDT", "lean": "short", "rationale": "rejected at resistance, funding rich", "score": 0.64, "correlation_group": "alt-l1"}
+]}
