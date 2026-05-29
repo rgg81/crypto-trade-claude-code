@@ -233,7 +233,8 @@ def sortino(returns: list[float], periods_per_year: float = PERIODS_PER_YEAR) ->
     downside = arr[arr < 0]
     dd = downside.std(ddof=1) if len(downside) >= 2 else 0.0
     if dd == 0:
-        return float(arr.mean() / 1e-9 * np.sqrt(periods_per_year)) if arr.mean() > 0 else 0.0
+        # no measurable downside: infinite Sortino if net positive, else 0 (like profit_factor)
+        return float("inf") if arr.mean() > 0 else 0.0
     return float(arr.mean() / dd * np.sqrt(periods_per_year))
 
 
@@ -354,10 +355,13 @@ DSR_THRESHOLD = 0.95
 def deflated_sharpe_pvalue(returns: list[float], num_trials: int,
                            periods_per_year: float = PERIODS_PER_YEAR) -> float:
     """Probability the desk's Sharpe is genuinely > 0 after deflating for multiple testing
-    (vendored Lopez de Prado DSR). 0.0 if too few observations to judge."""
-    if len(returns) < 3:
+    (vendored Lopez de Prado DSR). 0.0 if < 10 observations (the vendored DSR requires
+    backtest_length >= 10)."""
+    if len(returns) < 10:
         return 0.0
-    observed = sharpe(returns, periods_per_year)
+    # Pass the RAW per-period Sharpe (mean/std). The DSR standard error is computed from
+    # backtest_length, so feeding an annualized SR would be a scale mismatch.
+    observed = sharpe(returns, periods_per_year=1.0)
     result = deflated_sharpe_ratio(observed_sr=observed, num_trials=max(1, num_trials),
                                    backtest_length=len(returns))
     return float(result.dsr_pvalue)
@@ -493,7 +497,7 @@ def build_scorecard(state_dir, memory_dir, monthly_target: float = 0.05,
     period_return = eq[-1] / eq[0] - 1.0
     mdd = max_drawdown(eq)
     shp = sharpe(rets)
-    dsr = deflated_sharpe_pvalue(rets, num_trials=max(1, n_cycles))
+    dsr = deflated_sharpe_pvalue(rets, num_trials=10)  # conservative fixed trial count (not cycle count)
     beats_baseline = period_return > 0  # vs flat cash; a price baseline can refine this later
     grad = graduation_verdict(n_cycles, shp, dsr, beats_baseline, mdd,
                               min_cycles=min_cycles, horizon_cycles=horizon_cycles)
@@ -503,7 +507,7 @@ def build_scorecard(state_dir, memory_dir, monthly_target: float = 0.05,
     warnings: list[str] = []
     if mdd >= 0.05:
         warnings.append(f"in drawdown: {mdd:.0%} from peak — bias risk-off")
-    if n_cycles >= 3 and dsr < 0.95:
+    if n_cycles >= 11 and dsr < 0.95:  # DSR only computable at >=10 returns (>=11 equity points)
         warnings.append("edge not statistically proven (DSR < 0.95) — size conservatively")
     if n_cycles >= 6 and period_return < monthly_target * (n_cycles / 180.0):
         warnings.append(f"running below the {monthly_target:.0%}/mo target — do not force trades")
