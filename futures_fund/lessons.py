@@ -1,0 +1,69 @@
+from __future__ import annotations
+
+import uuid
+from datetime import datetime
+from pathlib import Path
+from typing import Literal
+
+from pydantic import BaseModel, Field
+
+LessonState = Literal["candidate", "validated", "retired"]
+
+
+class Lesson(BaseModel):
+    id: str = Field(default_factory=lambda: uuid.uuid4().hex)
+    ts: datetime
+    text: str
+    regime: str | None = None         # quadrant it applies to; None = applies in all regimes
+    symbol: str | None = None
+    tags: list[str] = Field(default_factory=list)
+    importance: int = 5               # 1-10
+    state: LessonState = "candidate"
+    confirmations: int = 0
+    provenance: list[str] = Field(default_factory=list)  # journal decision ids
+
+
+def _store(memory_dir) -> Path:
+    return Path(memory_dir) / "lessons" / "lessons.jsonl"
+
+
+def append_lesson(memory_dir, fields: dict, ts: datetime) -> str:
+    data = {**fields, "ts": ts}
+    data.setdefault("id", uuid.uuid4().hex)
+    lesson = Lesson.model_validate(data)
+    p = _store(memory_dir)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with p.open("a") as fh:
+        fh.write(lesson.model_dump_json() + "\n")
+    return lesson.id
+
+
+def read_lessons(memory_dir) -> list[Lesson]:
+    p = _store(memory_dir)
+    if not p.exists():
+        return []
+    return [Lesson.model_validate_json(line) for line in p.read_text().splitlines() if line.strip()]
+
+
+def score_lesson(lesson: Lesson, now: datetime, query_tags: list[str],
+                 w_rec: float = 1.0, w_imp: float = 1.0, w_rel: float = 1.0) -> float:
+    """Generative-Agents-style score: recency (Ebbinghaus) + importance + tag relevance (Jaccard).
+    """
+    hours = max(0.0, (now - lesson.ts).total_seconds() / 3600.0)
+    recency = 0.995 ** hours
+    importance = lesson.importance / 10.0
+    qt, lt = set(query_tags), set(lesson.tags)
+    relevance = len(qt & lt) / len(qt | lt) if (qt or lt) else 0.0
+    return w_rec * recency + w_imp * importance + w_rel * relevance
+
+
+def retrieve_lessons(memory_dir, now: datetime, regime: str | None,
+                     query_tags: list[str], k: int = 5) -> list[Lesson]:
+    """Regime-filter FIRST (a lesson with regime=None applies everywhere), then rank by score,
+    return the top-k. Retired lessons are excluded."""
+    candidates = [
+        lz for lz in read_lessons(memory_dir)
+        if lz.state != "retired" and (lz.regime is None or lz.regime == regime)
+    ]
+    candidates.sort(key=lambda lz: score_lesson(lz, now, query_tags), reverse=True)
+    return candidates[:k]
