@@ -5,10 +5,84 @@ from futures_fund.vendors import (
     NewsItem,
     archive_jsonl,
     fetch_fear_greed,
-    parse_cryptopanic,
+    fetch_macro,
+    fetch_news,
     parse_fear_greed,
     parse_fred,
+    parse_rss,
+    tag_instruments,
 )
+
+_RSS = b"""<?xml version="1.0"?><rss version="2.0"><channel>
+<item><title>Bitcoin ETFs bleed $2.8B in record outflow streak</title>
+<link>https://x/news/1</link><pubDate>Fri, 29 May 2026 14:20:32 +0000</pubDate></item>
+<item><title>Ethereum downside pressure remains as $1.8K becomes key</title>
+<link>https://x/news/2</link><pubDate>Fri, 29 May 2026 15:50:08 +0000</pubDate></item>
+<item><title>Regulators weigh new stablecoin rules</title>
+<link>https://x/news/3</link><pubDate>Fri, 29 May 2026 13:00:00 +0000</pubDate></item>
+</channel></rss>"""
+
+
+def test_tag_instruments_matches_base_and_alias():
+    assert tag_instruments("Bitcoin ETFs bleed", ["BTC", "ETH"]) == ["BTC"]
+    assert tag_instruments("Ethereum downside; BTC dips", ["BTC", "ETH"]) == ["BTC", "ETH"]
+    assert tag_instruments("Regulators weigh stablecoin rules", ["BTC", "ETH"]) == []
+
+
+def test_parse_rss_extracts_items_and_tags():
+    items = parse_rss(_RSS, source="CoinDesk", symbols=["BTC", "ETH"])
+    assert len(items) == 3 and all(isinstance(i, NewsItem) for i in items)
+    assert items[0].title.startswith("Bitcoin ETFs")
+    assert items[0].source == "CoinDesk" and items[0].url == "https://x/news/1"
+    assert items[0].instruments == ["BTC"]
+    assert items[1].instruments == ["ETH"]
+
+
+def test_parse_rss_tolerates_garbage():
+    assert parse_rss(b"not xml", source="X", symbols=["BTC"]) == []
+
+
+class _Resp:
+    def __init__(self, *, content=b"", payload=None, status=200):
+        self.content = content
+        self._payload = payload
+        self.status_code = status
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError(f"HTTP {self.status_code}")
+    def json(self):
+        return self._payload
+
+
+class _NewsClient:
+    def __init__(self, by_url):
+        self.by_url = by_url
+    def get(self, url, params=None, **kw):
+        return self.by_url.get(url, _Resp(status=404))
+
+
+def test_fetch_news_merges_sources_and_dedupes():
+    c = _NewsClient({"u1": _Resp(content=_RSS), "u2": _Resp(content=_RSS)})  # same feed twice
+    items = fetch_news(c, sources=["u1", "u2"], symbols=["BTC", "ETH"], per_source=10)
+    assert len(items) == 3  # deduped by title across the two sources
+
+
+def test_fetch_news_skips_failing_source():
+    c = _NewsClient({"ok": _Resp(content=_RSS), "bad": _Resp(status=503)})
+    items = fetch_news(c, sources=["bad", "ok"], symbols=["BTC"], per_source=10)
+    assert len(items) == 3  # bad source skipped, good one parsed
+
+
+def test_fetch_macro_returns_latest_values():
+    obs = {"observations": [{"date": "2026-05-26", "value": "4.47"},
+                            {"date": "2026-05-27", "value": "4.48"}]}
+    c = _NewsClient({"https://api.stlouisfed.org/fred/series/observations": _Resp(payload=obs)})
+    macro = fetch_macro(c, series=["DGS10"], api_key="k" * 32)
+    assert macro["DGS10"] == 4.48  # newest non-missing
+
+
+def test_fetch_macro_without_key_is_empty():
+    assert fetch_macro(_NewsClient({}), series=["DGS10"], api_key=None) == {}
 
 
 class FakeResp:
@@ -39,20 +113,6 @@ def test_parse_fear_greed_casts_strings_to_typed():
     assert isinstance(fg, FearGreed)
     assert fg.value == 23 and fg.classification == "Extreme Fear"
     assert str(fg.ts.tzinfo) == "UTC"
-
-
-def test_parse_cryptopanic_v2_uses_instruments():
-    payload = {"results": [
-        {"title": "BTC rips", "url": "http://cp/1", "published_at": "2026-05-29T08:00:00Z",
-         "kind": "news", "source": {"title": "CoinDesk"},
-         "instruments": [{"code": "BTC"}, {"code": "ETH"}],
-         "votes": {"positive": 5, "negative": 1}},
-    ]}
-    items = parse_cryptopanic(payload)
-    assert len(items) == 1 and isinstance(items[0], NewsItem)
-    assert items[0].source == "CoinDesk"
-    assert items[0].instruments == ["BTC", "ETH"]
-    assert items[0].votes_positive == 5
 
 
 def test_parse_fred_skips_missing_dot_values():
