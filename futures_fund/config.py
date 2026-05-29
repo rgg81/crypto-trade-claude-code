@@ -42,6 +42,7 @@ class Settings(BaseModel):
     account_size_usdt: float = 10_000.0
     timeframe: str = "4h"
     symbol_count: int = 10
+    symbols: list[str] = Field(default_factory=lambda: ["BTC/USDT:USDT", "ETH/USDT:USDT"])
     deep_model: str = "opus"
     quick_model: str = "haiku"
     verdict_horizon_weeks: int = 8
