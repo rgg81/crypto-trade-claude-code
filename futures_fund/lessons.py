@@ -70,3 +70,66 @@ def retrieve_lessons(memory_dir, now: datetime, regime: str | None,
     ]
     candidates.sort(key=lambda lz: score_lesson(lz, now, query_tags), reverse=True)
     return candidates[:k]
+
+
+def _write_all(memory_dir, lessons: list[Lesson]) -> None:
+    p = _store(memory_dir)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("".join(lz.model_dump_json() + "\n" for lz in lessons))
+
+
+def update_lesson(memory_dir, lesson_id: str, **fields) -> bool:
+    """Merge `fields` into the lesson with `lesson_id`; rewrites the store. False if not found."""
+    lessons = read_lessons(memory_dir)
+    hit = False
+    for i, lz in enumerate(lessons):
+        if lz.id == lesson_id:
+            lessons[i] = lz.model_copy(update=fields)
+            hit = True
+    if hit:
+        _write_all(memory_dir, lessons)
+    return hit
+
+
+def confirm_lesson(memory_dir, lesson_id: str, *, promote_threshold: int = 5) -> bool:
+    """Increment a lesson's confirmation count; promote CANDIDATE -> VALIDATED at the threshold.
+    (Count-based here; Phase C gates promotion additionally on statistical support — spec §6.)"""
+    lessons = read_lessons(memory_dir)
+    hit = False
+    for i, lz in enumerate(lessons):
+        if lz.id == lesson_id:
+            c = lz.confirmations + 1
+            state = (
+                "validated"
+                if (lz.state == "candidate" and c >= promote_threshold)
+                else lz.state
+            )
+            lessons[i] = lz.model_copy(update={"confirmations": c, "state": state})
+            hit = True
+    if hit:
+        _write_all(memory_dir, lessons)
+    return hit
+
+
+def demote_lesson(memory_dir, lesson_id: str) -> bool:
+    """Step a lesson down: VALIDATED -> CANDIDATE, CANDIDATE/RETIRED -> RETIRED.
+    Used to aggressively age out stale or regime-mismatched rules (spec §6)."""
+    lessons = read_lessons(memory_dir)
+    hit = False
+    for i, lz in enumerate(lessons):
+        if lz.id == lesson_id:
+            new = "candidate" if lz.state == "validated" else "retired"
+            lessons[i] = lz.model_copy(update={"state": new})
+            hit = True
+    if hit:
+        _write_all(memory_dir, lessons)
+    return hit
+
+
+def retire_lesson(memory_dir, lesson_id: str) -> bool:
+    return update_lesson(memory_dir, lesson_id, state="retired")
+
+
+def validated_lessons(memory_dir) -> list[Lesson]:
+    """The VALIDATED lessons — these act as hard vetoes / standing rules for the team."""
+    return [lz for lz in read_lessons(memory_dir) if lz.state == "validated"]
