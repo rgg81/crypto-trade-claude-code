@@ -98,3 +98,10 @@ def gate_execute_step(exchange, settings: Settings, state_dir, memory_dir,
 def reflect_step(memory_dir) -> dict:
     """Reflection: hand the Reflector subagent the winners/losers to contrast."""
     return reflection_payload(memory_dir)
+
+
+def lessons_step(memory_dir, now, regime: str | None, tags: list[str], k: int = 5) -> list[dict]:
+    """Retrieve the top-K regime-relevant lessons (as JSON dicts) for injection into the
+    debate/trader subagent prompts, so the team learns from past decisions (spec §6)."""
+    from futures_fund.lessons import retrieve_lessons
+    return [lz.model_dump(mode="json") for lz in retrieve_lessons(memory_dir, now, regime, tags, k)]
