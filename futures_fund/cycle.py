@@ -112,6 +112,7 @@ def execute_proposals(  # noqa: PLR0912
                    "entry": p.entry, "stop": p.stop} for p in positions]
 
     approved = []
+    vetoed: list = []
     for prop in proposals:
         spec = ctx.specs_by_raw.get(prop.symbol)
         if spec is None:
@@ -122,6 +123,10 @@ def execute_proposals(  # noqa: PLR0912
                                        health=health, open_positions=open_dicts))
         if decision.verdict in ("approve", "resize") and decision.sized_trade is not None:
             approved.append(decision.sized_trade)
+        else:
+            vetoed.append({"symbol": prop.symbol, "direction": prop.direction,
+                           "entry": prop.entry, "stop": prop.stop,
+                           "take_profits": prop.take_profits, "reason": decision.reason})
 
     cvar_mult = cvar_risk_multiplier(_recent_returns(memory_dir, health.equity))
     book = consolidate(approved, health.equity, caps.max_heat, cvar_mult=cvar_mult)
@@ -178,8 +183,13 @@ def execute_proposals(  # noqa: PLR0912
     save_account(state_dir, account)
     save_positions(state_dir, keep)
     report["equity"] = final_health.equity
+    report.setdefault("vetoed", 0)
     from futures_fund.equity_log import record_equity
     record_equity(state_dir, now, final_health.equity, cycle_no)
+    from futures_fund.shadow import record_shadow
+    if vetoed:
+        record_shadow(state_dir, now, cycle_no, vetoed)
+        report["vetoed"] = len(vetoed)
     return report
 
 
