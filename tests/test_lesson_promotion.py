@@ -57,3 +57,14 @@ def test_retire_lesson(tmp_path):
     lid = _add(tmp_path)
     assert retire_lesson(tmp_path, lid) is True
     assert next(lz for lz in read_lessons(tmp_path) if lz.id == lid).state == "retired"
+
+
+def test_demote_resets_confirmations_so_repromotion_is_not_instant(tmp_path):
+    lid = _add(tmp_path)
+    for _ in range(5):
+        confirm_lesson(tmp_path, lid, promote_threshold=5)  # -> validated, confirmations 5
+    demote_lesson(tmp_path, lid)  # validated -> candidate, confirmations reset to 0
+    lz = next(z for z in read_lessons(tmp_path) if z.id == lid)
+    assert lz.state == "candidate" and lz.confirmations == 0
+    confirm_lesson(tmp_path, lid, promote_threshold=5)  # a single confirm must NOT re-promote
+    assert next(z for z in read_lessons(tmp_path) if z.id == lid).state == "candidate"

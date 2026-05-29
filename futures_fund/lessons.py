@@ -113,13 +113,15 @@ def confirm_lesson(memory_dir, lesson_id: str, *, promote_threshold: int = 5) ->
 
 def demote_lesson(memory_dir, lesson_id: str) -> bool:
     """Step a lesson down: VALIDATED -> CANDIDATE, CANDIDATE/RETIRED -> RETIRED.
-    Used to aggressively age out stale or regime-mismatched rules (spec §6)."""
+    Used to aggressively age out stale or regime-mismatched rules (spec §6).
+    Resets confirmations to 0 so a demoted lesson must re-earn promotion
+    (anti-ossification, spec §6)."""
     lessons = read_lessons(memory_dir)
     hit = False
     for i, lz in enumerate(lessons):
         if lz.id == lesson_id:
             new = "candidate" if lz.state == "validated" else "retired"
-            lessons[i] = lz.model_copy(update={"state": new})
+            lessons[i] = lz.model_copy(update={"state": new, "confirmations": 0})
             hit = True
     if hit:
         _write_all(memory_dir, lessons)
