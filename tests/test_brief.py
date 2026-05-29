@@ -23,6 +23,17 @@ class FakeExchange:
                            interval_hours=8.0, mark_price=float(self.df["close"].iloc[-1]),
                            index_price=float(self.df["close"].iloc[-1]))
 
+    def open_interest_history(self, symbol, period="4h", limit=200):
+        return pd.DataFrame(
+            {"timestamp": pd.date_range("2026-01-01", periods=3, freq="4h", tz="UTC"),
+             "oi_amount": [100.0, 101.0, 99.0], "oi_value": [1.0e7, 1.01e7, 0.99e7]})
+
+    def long_short_ratio(self, symbol, period="4h", limit=200):
+        return pd.DataFrame(
+            {"timestamp": pd.date_range("2026-01-01", periods=2, freq="4h", tz="UTC"),
+             "long_short_ratio": [1.5, 1.6], "long_account": [0.6, 0.62],
+             "short_account": [0.4, 0.38]})
+
 
 def _uptrend(n=60):
     rng = np.random.default_rng(2)
@@ -48,3 +59,20 @@ def test_brief_has_expected_keys_and_types():
 def test_brief_momentum_positive_on_uptrend():
     b = build_symbol_brief(FakeExchange(_uptrend()), "BTC/USDT:USDT")
     assert b["momentum_20"] > 0
+
+
+def test_brief_includes_derivatives_signals():
+    b = build_symbol_brief(FakeExchange(_uptrend()), "BTC/USDT:USDT")
+    assert b["long_short_ratio"] == 1.6 and b["long_account"] == 0.62
+    assert "oi_value" in b and b["oi_value"] > 0
+    assert "oi_change" in b
+
+
+def test_brief_degrades_when_derivatives_unavailable():
+    class NoDeriv(FakeExchange):
+        def open_interest_history(self, *a, **k):
+            raise RuntimeError("unavailable")
+        def long_short_ratio(self, *a, **k):
+            raise RuntimeError("unavailable")
+    b = build_symbol_brief(NoDeriv(_uptrend()), "BTC/USDT:USDT")
+    assert b["long_short_ratio"] is None and b["oi_value"] is None
