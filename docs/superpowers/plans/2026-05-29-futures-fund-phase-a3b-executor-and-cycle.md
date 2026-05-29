@@ -139,7 +139,8 @@ def test_long_stop_hit_realizes_loss():
     assert isinstance(ct, ClosedTrade)
     assert ct.reason == "stop"
     assert ct.exit_price == pytest.approx(95.0)            # no slippage
-    assert ct.realized_pnl == pytest.approx(0.5 * (95.0 - 100.0))  # -2.5 minus tiny fee
+    # gross -2.5 minus the exit fee (~0.024); abs tolerance covers the fee
+    assert ct.realized_pnl == pytest.approx(0.5 * (95.0 - 100.0), abs=0.05)
     assert ct.realized_pnl < 0
 
 
@@ -171,7 +172,8 @@ def test_short_stop_hit_above_entry():
                      funding_rate=0.0, funding_events=0, slippage_bps=0)
     assert ct.reason == "stop"
     assert ct.exit_price == pytest.approx(105.0)
-    assert ct.realized_pnl == pytest.approx(0.5 * (100.0 - 105.0))  # -2.5 minus fee
+    # gross -2.5 minus the exit fee (~0.026); abs tolerance covers the fee
+    assert ct.realized_pnl == pytest.approx(0.5 * (100.0 - 105.0), abs=0.05)
 
 
 def test_short_take_profit_below_entry():
