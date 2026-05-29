@@ -1,0 +1,16 @@
+# Operation TEMPEST — non-secret runtime config. Secrets come from env (.env), never here.
+account_size_usdt: 10000.0
+timeframe: "4h"
+symbol_count: 10
+deep_model: "opus"
+quick_model: "haiku"
+verdict_horizon_weeks: 8
+exchange:
+  testnet: true
+  key_env: "BINANCE_KEY"
+  secret_env: "BINANCE_SECRET"
+data:
+  cryptopanic_token_env: "CRYPTOPANIC_TOKEN"
+  fred_key_env: "FRED_API_KEY"
+  fred_series: ["DTWEXBGS", "DGS10", "FEDFUNDS", "CPIAUCSL"]
+  archive_dir: "state/archive"
