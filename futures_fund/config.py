@@ -22,16 +22,15 @@ class ExchangeSettings(BaseModel):
 
 
 class DataSettings(BaseModel):
-    cryptopanic_token_env: str = "CRYPTOPANIC_TOKEN"
+    news_rss_sources: list[str] = Field(default_factory=lambda: [
+        "https://www.coindesk.com/arc/outboundfeeds/rss/?outputType=xml",
+        "https://cointelegraph.com/rss",
+    ])
     fred_key_env: str = "FRED_API_KEY"
     fred_series: list[str] = Field(
         default_factory=lambda: ["DTWEXBGS", "DGS10", "FEDFUNDS", "CPIAUCSL"]
     )
     archive_dir: str = "state/archive"
-
-    @property
-    def cryptopanic_token(self) -> str | None:
-        return os.environ.get(self.cryptopanic_token_env)
 
     @property
     def fred_api_key(self) -> str | None:

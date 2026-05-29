@@ -28,6 +28,12 @@ def test_secrets_read_from_env(monkeypatch):
 
 
 def test_missing_secret_is_none(monkeypatch):
-    monkeypatch.delenv("CRYPTOPANIC_TOKEN", raising=False)
+    monkeypatch.delenv("FRED_API_KEY", raising=False)
     s = Settings()
-    assert s.data.cryptopanic_token is None
+    assert s.data.fred_api_key is None
+
+
+def test_news_sources_default_present():
+    s = Settings()
+    assert any("coindesk" in u for u in s.data.news_rss_sources)
+    assert any("cointelegraph" in u for u in s.data.news_rss_sources)

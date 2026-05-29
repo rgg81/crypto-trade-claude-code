@@ -10,7 +10,9 @@ exchange:
   key_env: "BINANCE_KEY"
   secret_env: "BINANCE_SECRET"
 data:
-  cryptopanic_token_env: "CRYPTOPANIC_TOKEN"
+  news_rss_sources:
+    - "https://www.coindesk.com/arc/outboundfeeds/rss/?outputType=xml"
+    - "https://cointelegraph.com/rss"
   fred_key_env: "FRED_API_KEY"
   fred_series: ["DTWEXBGS", "DGS10", "FEDFUNDS", "CPIAUCSL"]
   archive_dir: "state/archive"
