@@ -8,4 +8,5 @@ def live_allowed(settings: Settings, scorecard: dict) -> bool:
     (The cycle additionally checks the HALT flag.) Survival-first: default-deny."""
     if not getattr(settings, "live", False):
         return False
-    return (scorecard.get("graduation") or {}).get("status") == "graduated"
+    g = scorecard.get("graduation")
+    return isinstance(g, dict) and g.get("status") == "graduated"
