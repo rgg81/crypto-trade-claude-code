@@ -50,8 +50,31 @@ class Settings(BaseModel):
     data: DataSettings = Field(default_factory=DataSettings)
 
 
-def load_settings(path: str | Path = "config.yaml") -> Settings:
-    """Load non-secret config from YAML (defaults if file absent). Secrets come from env."""
+def load_env_file(path: str | Path = ".env") -> dict[str, str]:
+    """Load KEY=VALUE pairs from a .env file into os.environ WITHOUT overriding existing env
+    vars. Returns the parsed dict; no-op if the file is absent. So that secrets placed in
+    .env (gitignored) are actually available to the cycle, which reads keys from os.environ."""
     p = Path(path)
+    loaded: dict[str, str] = {}
+    if not p.exists():
+        return loaded
+    for line in p.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        k, v = k.strip(), v.strip().strip('"').strip("'")
+        if not k:
+            continue
+        loaded[k] = v
+        os.environ.setdefault(k, v)  # real env wins over the file
+    return loaded
+
+
+def load_settings(path: str | Path = "config.yaml") -> Settings:
+    """Load non-secret config from YAML (defaults if file absent). Secrets come from env;
+    a .env file beside the config is auto-loaded into the environment first."""
+    p = Path(path)
+    load_env_file(p.parent / ".env")
     raw = yaml.safe_load(p.read_text()) if p.exists() else {}
     return Settings(**(raw or {}))
