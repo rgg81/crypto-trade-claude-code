@@ -94,3 +94,26 @@ def test_reflect_step_splits_winners_losers(tmp_path):
     patch_outcome(memory_dir, did, {"realized_pnl": 42.0, "prediction_correct": True})
     payload = reflect_step(memory_dir)
     assert payload["n_closed"] == 1 and len(payload["winners"]) == 1
+
+
+def test_preflight_brief_includes_exchange_id(tmp_path):
+    ex = FakeExchange({"BTC/USDT:USDT": _uptrend()})
+    ctx = preflight_step(ex, _settings(), tmp_path / "s", tmp_path / "m",
+                         now=dt.datetime(2026, 3, 1, tzinfo=UTC), cycle_no=1)
+    assert ctx["briefs"][0]["exchange_id"] == "BTCUSDT"
+
+
+def test_gate_execute_normalizes_unified_symbol(tmp_path):
+    state_dir, memory_dir = tmp_path / "s", tmp_path / "m"
+    ex = FakeExchange({"BTC/USDT:USDT": _uptrend()})
+    pf = preflight_step(ex, _settings(), state_dir, memory_dir,
+                        now=dt.datetime(2026, 3, 1, tzinfo=UTC), cycle_no=1)
+    last = pf["briefs"][0]["last_close"]
+    # proposal emitted with the UNIFIED symbol must still execute (normalized to raw)
+    proposals = [{"symbol": "BTC/USDT:USDT", "direction": "long", "entry": last,
+                  "stop": last - 4.0, "take_profits": [last + 8.0], "atr": 2.0,
+                  "confidence": 0.7, "rationale": "x"}]
+    report = gate_execute_step(ex, _settings(), state_dir, memory_dir,
+                               now=dt.datetime(2026, 3, 1, tzinfo=UTC), cycle_no=1,
+                               proposals=proposals)
+    assert report["opened"] == 1 and report["dropped"] == 0

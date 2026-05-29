@@ -46,7 +46,8 @@ Run: `uv run python scripts/reflect_cli.py --cycle N` → `state/cycle/N/reflect
 - Inject `MISSION.md` verbatim at the top of EVERY subagent prompt.
 - Give each subagent ONLY its role file's inputs + the relevant cycle JSON; never your full context.
 - Each subagent must return ONLY valid JSON matching its contract. If a subagent returns malformed JSON, re-dispatch once with the validation error; if it fails again, log it, skip that symbol/agent, and continue (cap conviction — never trade on missing analysis).
-- Retrieve relevant lessons for the debate/trader prompts (regime-filtered, top 3-7) so the team learns from the past.
+- Analyst, Research Manager, and Trader subagents MUST set the `symbol` field of their output to the brief's `exchange_id` (the raw id, e.g. `BTCUSDT`), NOT the unified symbol. (The gate also normalizes unified->raw defensively, but emit the raw id.)
+- Retrieve relevant lessons for the debate/trader prompts (regime-filtered, top 3-7) so the team learns from the past. (a lesson-retrieval CLI is wired in Phase B3; until then proceed without injected lessons).
 
 ## Self-healing (see B3 / spec §5)
 If any `scripts/*` call errors: capture it to `state/error-log.jsonl`, diagnose the root cause (use systematic-debugging), fix the code, verify, commit, and append the repair to `memory/repair-journal.md` — then resume. NEVER weaken a risk limit or the execution path to make an error disappear; if you cannot fix it safely, set the HALT flag and surface.

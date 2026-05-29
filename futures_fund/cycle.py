@@ -96,7 +96,7 @@ def execute_proposals(  # noqa: PLR0912
         ctx: CycleContext, proposals: list[TradeProposal], contributing_agents: list[str],
         positions: list[Position], account: AccountState, state_dir, memory_dir,
         now: datetime, cycle_no: int, report: dict | None = None,
-        agent_key: str = _BASELINE) -> dict:
+        agent_key: str = _BASELINE, rationale_by_symbol: dict | None = None) -> dict:
     """Phases 7-10 for a given set of trade proposals (from the baseline OR the agent team):
     risk-gate each proposal, consolidate to a book, reconcile/execute, journal, persist.
     Reusable by both the baseline cycle and the Phase-B agent cycle."""
@@ -160,6 +160,7 @@ def execute_proposals(  # noqa: PLR0912
             "leverage": st.leverage, "funding_at_entry": st.proposal.funding_rate,
             "confidence": st.proposal.confidence, "dominant_signal": contributing_agents[0]
             if contributing_agents else "unknown", "contributing_agents": contributing_agents,
+            "rationale": (rationale_by_symbol or {}).get(st.proposal.symbol),
         })
         pos, entry_fee = open_position(st, cycle_no, now, _SLIPPAGE_BPS, decision_id=did)
         mmr, maint = mmr_for_notional(pos.qty * pos.entry, spec.mmr_brackets)
