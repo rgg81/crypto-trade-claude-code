@@ -27,13 +27,13 @@ You own the ambient backdrop: crowd mood and the macro regime. You do **NOT** re
 ```json
 {"agent": "sentiment", "symbol": "<raw exchange id e.g. BTCUSDT>", "stance": "bullish|bearish|neutral", "confidence": 0.0,
  "key_points": ["<concise sentiment/macro bullets>"],
- "signals": {"fear_greed": 0, "dxy_trend": 0, "social_attention": 0.0}}
+ "signals": {"fear_greed": 0, "dxy_trend": 0, "ust_10y": 0.0}}
 ```
-- `agent` MUST be `"sentiment"`. `confidence` in [0, 1]. `dxy_trend` is -1 (down/tailwind), 0 (flat), or +1 (up/headwind). Emit one object per shortlisted symbol (a JSON list when covering several).
+- `agent` MUST be `"sentiment"`. `confidence` in [0, 1]. `dxy_trend` is -1 (down/tailwind), 0 (flat), or +1 (up/headwind). `ust_10y` is the latest 10y yield from `market_context.macro` (or null if the macro feed is degraded). Use only `fear_greed` + macro — no social-attention feed is wired. Emit one object per shortlisted symbol (a JSON list when covering several).
 
 ## Example
 ```json
 {"agent": "sentiment", "symbol": "BTCUSDT", "stance": "neutral", "confidence": 0.5,
- "key_points": ["Fear&Greed 61 (greed) - mild contrarian caution", "macro: DXY soft, yields stable"],
- "signals": {"fear_greed": 61, "dxy_trend": -1, "social_attention": 0.4}}
+ "key_points": ["Fear&Greed 61 (greed) - mild contrarian caution", "macro: DXY soft, 10y yield ~4.5% stable"],
+ "signals": {"fear_greed": 61, "dxy_trend": -1, "ust_10y": 4.48}}
 ```

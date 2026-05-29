@@ -24,11 +24,16 @@ def preflight_step(exchange, settings: Settings, state_dir, memory_dir,
     import os
 
     from futures_fund.market_context import build_market_context
-    if http_client is None:
+    _owns_client = http_client is None
+    if _owns_client:
         import httpx
         http_client = httpx.Client(timeout=15.0)
-    market_context = build_market_context(http_client, settings,
-                                          fred_key=os.environ.get(settings.data.fred_key_env))
+    try:
+        market_context = build_market_context(http_client, settings,
+                                              fred_key=os.environ.get(settings.data.fred_key_env))
+    finally:
+        if _owns_client:
+            http_client.close()  # don't leak a client per cycle
     account = load_account(state_dir, settings.account_size_usdt)
     positions = load_positions(state_dir)
     report = {"cycle": cycle_no, "halted": False, "opened": 0, "closed": 0,
