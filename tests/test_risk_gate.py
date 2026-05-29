@@ -35,7 +35,6 @@ def _inputs(**over):
         regime=RegimeState(quadrant="low_vol_trend"),
         health=PortfolioHealth(equity=10_000.0, peak_equity=10_000.0),
         open_positions=[],
-        corr={},
         daily_pnl_pct=0.0, weekly_pnl_pct=0.0, monthly_pnl_pct=0.0,
     )
     base.update(over)
@@ -82,3 +81,35 @@ def test_daily_breaker_halts_new_entries():
 def test_cost_estimate_is_attached():
     d = evaluate(_inputs())
     assert d.sized_trade.cost.total > 0
+
+
+def test_short_trade_is_approved_with_liq_above_entry():
+    # short: stop above entry, take-profit below entry (RR 3:1)
+    prop = _proposal(direction="short", entry=100.0, stop=105.0, tps=(85.0,))
+    d = evaluate(_inputs(proposal=prop))
+    assert d.verdict == "approve"
+    assert d.sized_trade.leverage > 0
+    assert d.sized_trade.liq_price > 100.0  # short liquidates ABOVE entry
+
+
+def test_min_notional_vetoes_subminimum_trade():
+    spec = SymbolSpec(
+        symbol="BTCUSDT", tick_size=0.1, step_size=0.001, min_notional=1_000_000.0,
+        mmr_brackets=[
+            MmrBracket(
+                notional_floor=0, notional_cap=50_000, mmr=0.004,
+                maint_amount=0.0, max_leverage=125,
+            ),
+        ],
+    )
+    d = evaluate(_inputs(spec=spec))
+    assert d.verdict == "veto"
+    assert "notional" in d.reason.lower()
+
+
+def test_no_heat_headroom_vetoes_new_entry():
+    # existing open risk already == the 10% healthy cap -> zero headroom
+    existing = [dict(symbol="ETHUSDT", direction="long", qty=200.0, entry=100.0, stop=95.0)]
+    d = evaluate(_inputs(open_positions=existing))
+    assert d.verdict == "veto"
+    assert "heat" in d.reason.lower()

@@ -27,7 +27,6 @@ class GateInputs(BaseModel):
     regime: RegimeState
     health: PortfolioHealth
     open_positions: list[dict] = Field(default_factory=list)
-    corr: dict = Field(default_factory=dict)
     daily_pnl_pct: float = 0.0
     weekly_pnl_pct: float = 0.0
     monthly_pnl_pct: float = 0.0
@@ -49,8 +48,11 @@ def _build_sized(p: TradeProposal, spec: SymbolSpec, qty: float, leverage: float
     margin = notional / leverage if leverage > 0 else notional
     liq = liquidation_price(p.entry, qty, margin, p.direction, mmr, maint)
     fees = round_trip_fee(notional, maker_entry=False, maker_exit=False)
-    funding = project_funding(notional, p.funding_rate, p.direction,
-                              n_events=max(1, int(p.horizon_hours // 8)))
+    # Per-contract funding interval (Binance uses 4h for many perps, 1h under stress);
+    # not the magic 8.
+    n_events = max(1, int(p.horizon_hours // p.funding_interval_hours))
+    funding = project_funding(notional, p.funding_rate, p.direction, n_events=n_events)
+    # Slippage is left 0.0 in A1 (no live L2 book); A2/A3 wires slippage_cost + tick/step rounding.
     cost = CostEstimate(entry_fee=fees / 2, exit_fee=fees / 2, funding=max(0.0, funding))
     return SizedTrade(proposal=p, qty=qty, notional=notional, leverage=leverage,
                       margin=margin, liq_price=liq, cost=cost)
@@ -76,9 +78,13 @@ def evaluate(inp: GateInputs) -> RiskDecision:
         return RiskDecision(verdict="veto", reason=f"RR {rr:.2f} < min {MIN_RR}")
 
     # 3. Effective per-trade risk budget (caps × breaker multiplier)
+    # Caution tier (caps already halved) AND the -5% step-down can both apply on the same
+    # drawdown — the compounding de-risk is intentional (survival-first).
     risk_pct = caps.per_trade_risk_pct * breaker.risk_multiplier
 
-    # 4. Heat headroom (correlation handled by treating the new trade's cluster additively)
+    # 4. Heat headroom: total open risk vs cap. Conservative — total heat >= any single
+    #    correlation cluster's heat, so no unsafe trade slips through. Cluster-aware capping
+    #    (treating correlated positions as one) is the Portfolio Manager's job (stage 6, A3).
     equity = inp.health.equity
     used_heat = sum(position_risk(x["qty"], x["entry"], x["stop"], equity)
                     for x in inp.open_positions)

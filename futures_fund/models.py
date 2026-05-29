@@ -43,6 +43,8 @@ class TradeProposal(BaseModel):
     confidence: float = Field(ge=0.0, le=1.0)
     horizon_hours: float = Field(gt=0)
     funding_rate: float             # current/predicted 8h funding rate (e.g. 0.0001)
+    # 8h majors; 4h many perps; per-contract
+    funding_interval_hours: float = Field(default=8.0, gt=0)
 
     @model_validator(mode="after")
     def _check_stop_side(self) -> TradeProposal:
