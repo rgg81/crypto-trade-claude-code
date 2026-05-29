@@ -6,13 +6,15 @@ from pathlib import Path
 from futures_fund.journal import read_all_decisions
 from futures_fund.lessons import append_lesson
 
+_WINNER_THRESHOLD = 0.0  # strict: only strictly-positive realized PnL is a win (breakeven = loss)
+
 
 def reflection_payload(memory_dir) -> dict:
     """Split closed decisions into winners/losers for the Reflector subagent to contrast.
     (The Reflector reasons over this; promotion/validation gating is Phase C.)"""
     closed = [d for d in read_all_decisions(memory_dir) if d.get("realized_pnl") is not None]
-    winners = [d for d in closed if d["realized_pnl"] > 0]
-    losers = [d for d in closed if d["realized_pnl"] <= 0]
+    winners = [d for d in closed if d["realized_pnl"] > _WINNER_THRESHOLD]
+    losers = [d for d in closed if d["realized_pnl"] <= _WINNER_THRESHOLD]
     return {"winners": winners, "losers": losers, "n_closed": len(closed)}
 
 

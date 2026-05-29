@@ -60,7 +60,8 @@ def _recent_returns(memory_dir, equity: float) -> list[float]:
 
 
 def audit_and_reflect(ctx: CycleContext, positions: list[Position], account: AccountState,
-                      memory_dir, now: datetime, report: dict) -> list[Position]:
+                      memory_dir, now: datetime, report: dict,
+                      agent_key: str = _BASELINE) -> list[Position]:
     """Phase 1: close positions whose latest bar hit stop/tp/liq; patch outcomes + hit-rate."""
     still_open: list[Position] = []
     for p in positions:
@@ -87,22 +88,25 @@ def audit_and_reflect(ctx: CycleContext, positions: list[Position], account: Acc
                 "funding_paid": ct.funding, "slippage": ct.slippage,
                 "prediction_correct": ct.realized_pnl > 0,
             })
-            record_outcome(memory_dir, _BASELINE, ct.realized_pnl > 0)
+            record_outcome(memory_dir, agent_key, ct.realized_pnl > 0)
     return still_open
 
 
 def execute_proposals(  # noqa: PLR0912
         ctx: CycleContext, proposals: list[TradeProposal], contributing_agents: list[str],
         positions: list[Position], account: AccountState, state_dir, memory_dir,
-        now: datetime, cycle_no: int, report: dict | None = None) -> dict:
+        now: datetime, cycle_no: int, report: dict | None = None,
+        agent_key: str = _BASELINE) -> dict:
     """Phases 7-10 for a given set of trade proposals (from the baseline OR the agent team):
     risk-gate each proposal, consolidate to a book, reconcile/execute, journal, persist.
     Reusable by both the baseline cycle and the Phase-B agent cycle."""
     if report is None:
         report = {"cycle": cycle_no, "halted": False, "opened": 0, "closed": 0,
-                  "carried": 0, "equity": account.balance, "actions": []}
+                  "carried": 0, "stuck_close": 0, "equity": account.balance, "actions": []}
     health = portfolio_health(account.balance, account.peak_equity, positions, ctx.prices,
-                              recent_hit_rate=hit_rate(memory_dir, _BASELINE))
+                              recent_hit_rate=hit_rate(memory_dir, agent_key))
+    # symbols[0] is the market bellwether (convention: BTC first) for the portfolio heat cap;
+    # per-proposal gating below still uses each symbol's own regime.
     caps = caps_for(simple_regime(ctx.frames[ctx.settings.symbols[0]]), health)
     open_dicts = [{"symbol": p.symbol, "direction": p.direction, "qty": p.qty,
                    "entry": p.entry, "stop": p.stop} for p in positions]
@@ -142,9 +146,10 @@ def execute_proposals(  # noqa: PLR0912
                 "exit_ts": now, "realized_pnl": ct.realized_pnl, "fees": ct.exit_fee,
                 "funding_paid": ct.funding, "prediction_correct": ct.realized_pnl > 0,
             })
-            record_outcome(memory_dir, _BASELINE, ct.realized_pnl > 0)
+            record_outcome(memory_dir, agent_key, ct.realized_pnl > 0)
     keep = [p for p in positions if p.symbol not in closed_syms]
-    report["carried"] += sum(1 for p in to_close if p.symbol not in closed_syms)
+    # reconcile wanted these closed but they were unpriceable -> stuck open (not a voluntary carry)
+    report["stuck_close"] += sum(1 for p in to_close if p.symbol not in closed_syms)
 
     for st in to_open:
         spec = ctx.specs_by_raw[st.proposal.symbol]
@@ -166,7 +171,7 @@ def execute_proposals(  # noqa: PLR0912
         report["actions"].append({"open": pos.symbol, "direction": pos.direction})
 
     final_health = portfolio_health(account.balance, account.peak_equity, keep, ctx.prices,
-                                    recent_hit_rate=hit_rate(memory_dir, _BASELINE))
+                                    recent_hit_rate=hit_rate(memory_dir, agent_key))
     account.peak_equity = max(account.peak_equity, final_health.equity)
     account.updated_ts = now
     save_account(state_dir, account)
@@ -182,7 +187,7 @@ def run_cycle(exchange, settings: Settings, state_dir, memory_dir,
     account = load_account(state_dir, settings.account_size_usdt)
     positions = load_positions(state_dir)
     report = {"cycle": cycle_no, "halted": False, "opened": 0, "closed": 0,
-              "carried": 0, "equity": account.balance, "actions": []}
+              "carried": 0, "stuck_close": 0, "equity": account.balance, "actions": []}
     if is_halted(state_dir):
         report["halted"] = True
         return report

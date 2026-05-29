@@ -60,7 +60,10 @@ def score_lesson(lesson: Lesson, now: datetime, query_tags: list[str],
 def retrieve_lessons(memory_dir, now: datetime, regime: str | None,
                      query_tags: list[str], k: int = 5) -> list[Lesson]:
     """Regime-filter FIRST (a lesson with regime=None applies everywhere), then rank by score,
-    return the top-k. Retired lessons are excluded."""
+    return the top-k. Retired lessons are excluded.
+
+    NOTE: passing regime=None as the QUERY matches only universal (lz.regime is None) lessons,
+    NOT all lessons; pass a regime string to also include lessons tagged to that regime."""
     candidates = [
         lz for lz in read_lessons(memory_dir)
         if lz.state != "retired" and (lz.regime is None or lz.regime == regime)
