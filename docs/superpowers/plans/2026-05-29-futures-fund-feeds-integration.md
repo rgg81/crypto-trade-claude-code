@@ -214,7 +214,7 @@ def fetch_macro(client, series: list[str], api_key: str | None) -> dict[str, flo
             r.raise_for_status()
             vals = parse_fred(r.json())  # [(date, value)], skips "."
             if vals:
-                out[sid] = vals[0][1]
+                out[sid] = max(vals, key=lambda dv: dv[0])[1]  # latest by ISO date — order-independent
         except Exception:
             continue
     return out
@@ -561,9 +561,10 @@ git commit -m "feat: preflight builds + attaches market_context (news/sentiment/
 - [ ] **Step 1: `scripts/preflight.py`** already calls `preflight_step` then saves context — no change needed for the http client (preflight builds a real one when `http_client=None`). Verify it passes no `http_client` (so production fetches live). (If it currently passes extra args, leave them.)
 
 - [ ] **Step 2: Edit the three analyst role files' `## Inputs`** to reference the real feed data (they previously had no live feed):
-  - `agents/news.md`: Inputs now include `the cycle context's market_context.news` (a list of recent headlines, each with title/url/source/published_at and the `instruments` symbols it mentions). Guidance: scan headlines for symbol-relevant + market-wide catalysts (listings/hacks/regulatory/ETF flows); set `risk_off_flag=1` on a clear adverse macro/regulatory catalyst; if `market_context.warnings` says the news feed is unavailable, lean neutral and say so.
-  - `agents/sentiment.md`: Inputs include `market_context.fear_greed` (value + classification) and `market_context.macro` (DGS10/DTWEXBGS/FEDFUNDS/CPIAUCSL). Guidance: Fear&Greed is contrarian; read DXY (DTWEXBGS) + 10y yields (DGS10) + Fed funds for risk-on/off; de-risk into hot CPI/FOMC; if macro/fear feeds are in `warnings`, cap conviction.
-  - `agents/derivatives.md`: Inputs note the per-symbol brief now carries `oi_value`, `oi_change`, `long_short_ratio`, `long_account`; if those are `null`, say the derivatives feed is degraded and cap conviction.
+  **Sharpened, NON-OVERLAPPING lanes (decided): News = discrete events; Sentiment/Macro = the ambient backdrop; positioning lives with Derivatives. Each role file must state its lane AND what it must NOT do.**
+  - `agents/news.md`: **The event desk — discrete, datable CATALYSTS ONLY.** Inputs: `market_context.news` (recent headlines, each with title/url/source/published_at + the `instruments` symbols it mentions). Guidance: identify discrete catalysts (ETF flows, hacks/exploits, regulatory/legal rulings, listings/delistings, protocol upgrades, exchange events) and their directional lean; set `risk_off_flag=1` on a clear adverse catalyst. **Do NOT opine on crowd mood/Fear&Greed (that's Sentiment) or futures positioning (that's Derivatives).** If `market_context.warnings` flags the news feed unavailable OR there is no datable catalyst, return `stance:neutral` with low confidence and say so (no fabricated catalysts).
+  - `agents/sentiment.md`: **The backdrop desk — ambient MOOD + MACRO ONLY.** Inputs: `market_context.fear_greed` (value + classification) and `market_context.macro` (DTWEXBGS=broad dollar, DGS10=10y yield, FEDFUNDS, CPIAUCSL). Guidance: Fear&Greed is CONTRARIAN at extremes; read DXY + 10y yields + Fed funds for the risk-on/off regime; de-risk into hot CPI/FOMC. **Do NOT react to individual headlines (that's News) and do NOT read long/short positioning (that's Derivatives).** If macro or Fear&Greed is in `warnings`, cap conviction and note the missing read.
+  - `agents/derivatives.md`: **Owns POSITIONING & flow.** Inputs: the per-symbol brief now carries `funding_rate`, `oi_value`, `oi_change`, `long_short_ratio`, `long_account`. Reason about crowding/squeeze risk, funding carry, OI behavior, liquidation fuel. If those fields are `null`, say the derivatives feed is degraded and cap conviction.
 
 - [ ] **Step 3: Edit `SKILL.md`** — in `## Subagent dispatch rules`, add a bullet: the cycle context (`state/cycle/N/context.json`) now carries a `market_context` block (news headlines, Fear&Greed, macro) and the per-symbol briefs carry OI/long-short. Inject the relevant slice into each analyst (news→`market_context.news`, sentiment→`market_context.fear_greed`+`.macro`, derivatives→brief positioning); honor `market_context.warnings` by capping conviction on any degraded feed.
 
