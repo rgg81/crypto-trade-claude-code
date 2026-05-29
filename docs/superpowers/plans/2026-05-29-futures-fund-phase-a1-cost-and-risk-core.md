@@ -204,7 +204,7 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'futures_fund.models'`.
 ```python
 from __future__ import annotations
 
-from typing import Literal, Optional
+from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -249,7 +249,7 @@ class TradeProposal(BaseModel):
     funding_rate: float             # current/predicted 8h funding rate (e.g. 0.0001)
 
     @model_validator(mode="after")
-    def _check_stop_side(self) -> "TradeProposal":
+    def _check_stop_side(self) -> TradeProposal:
         if self.direction == "long" and self.stop >= self.entry:
             raise ValueError("long stop must be below entry")
         if self.direction == "short" and self.stop <= self.entry:
@@ -320,11 +320,11 @@ class RiskCaps(BaseModel):
 class RiskDecision(BaseModel):
     verdict: Verdict
     reason: str
-    sized_trade: Optional[SizedTrade] = None
+    sized_trade: SizedTrade | None = None
     warnings: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
-    def _check_sized(self) -> "RiskDecision":
+    def _check_sized(self) -> RiskDecision:
         if self.verdict in ("approve", "resize") and self.sized_trade is None:
             raise ValueError(f"verdict '{self.verdict}' requires a sized_trade")
         return self
@@ -387,7 +387,7 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'futures_fund.costs'`.
 ```python
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
 from futures_fund.models import Direction
 
@@ -458,6 +458,12 @@ def test_count_funding_events_none_within_window():
     assert count_funding_events(_utc(2026, 5, 29, 9), _utc(2026, 5, 29, 15)) == 0
 
 
+def test_count_funding_events_4h_interval_more_events():
+    # 4h funding: 07:00 -> 17:00 crosses 08:00, 12:00, 16:00 = 3
+    n = count_funding_events(_utc(2026, 5, 29, 7, 0), _utc(2026, 5, 29, 17, 0), interval_hours=4)
+    assert n == 3
+
+
 def test_long_pays_positive_funding():
     # notional 10k, funding +0.01% per event, 2 events, long -> pays 2.0 USDT (positive cost)
     cost = project_funding(notional=10_000.0, funding_rate=0.0001, direction="long", n_events=2)
@@ -477,20 +483,34 @@ Expected: FAIL — `ImportError: cannot import name 'count_funding_events'`.
 - [ ] **Step 3: Write the implementation (append to `futures_fund/costs.py`)**
 
 ```python
-FUNDING_HOURS = (0, 8, 16)
+DEFAULT_FUNDING_INTERVAL_HOURS = 8  # majors (BTC/ETH); many perps are 4h, 1h under stress
 
 
-def count_funding_events(entry_ts: datetime, exit_ts: datetime) -> int:
-    """Number of funding settlements strictly within (entry_ts, exit_ts]."""
+def funding_boundary_hours(interval_hours: int = DEFAULT_FUNDING_INTERVAL_HOURS) -> tuple[int, ...]:
+    """UTC hours at which funding settles (8h -> 0,8,16; 4h -> 0,4,8,12,16,20)."""
+    return tuple(range(0, 24, interval_hours))
+
+
+def count_funding_events(
+    entry_ts: datetime, exit_ts: datetime,
+    interval_hours: int = DEFAULT_FUNDING_INTERVAL_HOURS,
+) -> int:
+    """Number of funding settlements strictly within (entry_ts, exit_ts].
+
+    The interval is CONTRACT-SPECIFIC on Binance (8h for majors, 4h for many perps,
+    1h under extreme volatility). A2/A3 must source it per-symbol from
+    GET /fapi/v1/fundingInfo (fundingIntervalHours); 8h is only the default here.
+    """
     if exit_ts <= entry_ts:
         return 0
+    hours = set(funding_boundary_hours(interval_hours))
     count = 0
     # walk hour-aligned boundaries from the first candidate after entry
     cursor = entry_ts.replace(minute=0, second=0, microsecond=0)
     if cursor <= entry_ts:
         cursor += timedelta(hours=1)
     while cursor <= exit_ts:
-        if cursor.hour in FUNDING_HOURS:
+        if cursor.hour in hours:
             count += 1
         cursor += timedelta(hours=1)
     return count
@@ -510,7 +530,7 @@ def project_funding(
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `uv run pytest tests/test_costs.py -v`
-Expected: PASS (8 passed total).
+Expected: PASS (9 passed total).
 
 - [ ] **Step 5: Commit**
 
@@ -555,7 +575,6 @@ def test_vwap_fill_insufficient_depth_returns_partial():
 
 
 def test_slippage_cost_is_qty_times_price_diff_from_reference():
-    # vwap 100.5 vs reference 100.0 on 15 units -> 7.5 USDT
     cost = slippage_cost([(100.0, 10.0), (101.0, 10.0)], qty=15.0, reference_price=100.0)
     # fill 10@100 + 5@101 = vwap 100.333..., diff 0.333.. * 15 = 5.0
     assert cost == pytest.approx(5.0)
@@ -603,7 +622,7 @@ def slippage_cost(
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `uv run pytest tests/test_costs.py -v`
-Expected: PASS (12 passed total).
+Expected: PASS (13 passed total).
 
 - [ ] **Step 5: Commit**
 
@@ -718,6 +737,11 @@ def liquidation_price(
 
     Long:  (qty*entry - margin - maint_amount) / (qty*(1 - mmr))
     Short: (qty*entry + margin + maint_amount) / (qty*(1 + mmr))
+
+    Matches Binance's USD-M formula (maintenance_margin = notional*mmr - maint_amount);
+    verified symbolically. Assumes (mmr, maint_amount) come from the bracket of the ENTRY
+    notional; if the resulting liq price implies a different bracket, A3 must re-solve with
+    that bracket's values. The live liquidation TRIGGER compares MARK price to this value.
     """
     if qty <= 0:
         raise ValueError("qty must be positive")
@@ -787,14 +811,14 @@ def test_choose_leverage_respects_cap_and_liq_distance():
     assert liq_distance_ratio(100.0, 95.0, liq, "long") >= 2.5 - 1e-6
 
 
-def test_choose_leverage_returns_zero_when_cap_too_high_to_be_safe():
-    # Tiny stop distance + high cap: even max leverage can't satisfy 2.5x? Then clamp down.
+def test_choose_leverage_returns_cap_when_geometry_is_safe():
+    # Tiny stop gap (0.1): even 50x keeps the liq price ~16x the stop gap away,
+    # so the cap itself is safe and choose_leverage returns the cap unchanged.
     lev = choose_leverage(
         entry=100.0, stop=99.9, qty=10.0, direction="long",
         mmr=0.004, maint_amount=0.0, max_leverage=50.0, min_liq_distance_mult=2.5,
     )
-    # leverage must be reduced so liq sits >= 2.5x the (tiny) stop gap
-    assert lev <= 50.0
+    assert lev == pytest.approx(50.0)
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -931,7 +955,7 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'futures_fund.portfolio
 ```python
 from __future__ import annotations
 
-from typing import Mapping
+from collections.abc import Mapping
 
 
 def position_risk(qty: float, entry: float, stop: float, equity: float) -> float:
@@ -1287,8 +1311,6 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'futures_fund.risk_gate
 ```python
 from __future__ import annotations
 
-from typing import Mapping
-
 from pydantic import BaseModel, Field
 
 from futures_fund.costs import project_funding, round_trip_fee
@@ -1428,6 +1450,8 @@ git commit -m "feat: risk gate capstone (approve/resize/veto) composing the core
 **Spec coverage (§7 / §7.1):** fees ✓ (T3), funding ✓ (T4), slippage ✓ (T5), liquidation off mark w/ tiered MMR + maint offset ✓ (T6), ATR-stop sizing + leverage-as-output + liq distance ✓ (T7), portfolio heat + correlation-as-one ✓ (T8), adaptive matrix + circuit breakers + CVaR ✓ (T9), hard risk gate approve/resize/veto ✓ (T10). Min RR 2:1 ✓ (T10). Isolated margin ✓ (T6/T7). *Deferred to later plans (correctly out of A1 scope):* live mark-price trigger (A3 monitor), funding-boundary counting against real timestamps (used by A3), the BNB-fee default toggle wiring (config, A2), CVaR alarm thresholding into the gate (wired in A3 with real return history).
 
 **Placeholder scan:** none — every step has runnable code and exact commands.
+
+**Adversarial verification (3 agents, 2026-05-29):** (1) The Binance USD-M isolated liquidation formula in T6 was confirmed correct three independent ways (symbolic/sympy, first-principles derivation, numeric) against Binance's official docs — including the maintenance-amount sign. (2) Funding sign (long pays positive funding) and current fee rates (maker 0.02% / taker 0.05%, 10% BNB discount) confirmed. (3) Every test's expected number in T3–T10 was recomputed by hand and matches the implementation; signatures are consistent across call sites; pydantic v2 syntax is valid. **Fixes applied from the review:** funding interval parameterized (Binance moved many perps to 4h, 1h under stress — was hardcoded 8h); six ruff findings fixed (unused `timezone`/`Mapping` imports, `typing.Mapping`→`collections.abc.Mapping`, quoted return annotations, `Optional`→`| None`); two misleading test name/comment fixed. The Task 10 lint step (`ruff check`) is expected clean after these fixes.
 
 **Type consistency:** `Direction`, `RegimeQuadrant`, `RegimeState`, `PortfolioHealth`, `RiskCaps`, `SymbolSpec`, `MmrBracket`, `TradeProposal`, `SizedTrade`, `CostEstimate`, `RiskDecision` are all defined in T2 and used with matching signatures in T6–T10. `liquidation_price`, `mmr_for_notional`, `qty_from_risk`, `choose_leverage`, `liq_distance_ratio`, `position_risk`, `caps_for`, `circuit_breaker`, `project_funding`, `round_trip_fee` signatures match between definition and call sites in T10.
 
