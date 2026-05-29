@@ -3,23 +3,48 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 import pandas as pd
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from futures_fund.models import MmrBracket, SymbolSpec
 
 
 class FundingInfo(BaseModel):
     symbol: str
-    current_rate: float       # ccxt fundingRate = Binance lastFundingRate (current, not predicted)
+    current_rate: float = Field(
+        description="Current (last) funding rate, NOT a prediction "
+        "(ccxt fundingRate == Binance lastFundingRate)."
+    )
     next_funding_ts: datetime
     interval_hours: float
     mark_price: float
     index_price: float
 
 
+def _filter_field(filters: list[dict], filter_type: str, field: str) -> float | None:
+    for f in filters:
+        if f.get("filterType") == filter_type and field in f:
+            return float(f[field])
+    return None
+
+
 def parse_symbol_spec(market: dict, tiers: list[dict]) -> SymbolSpec:
-    """ccxt market dict + leverage tiers -> SymbolSpec. precisionMode is TICK_SIZE so
-    precision.price/amount ARE the tick/step sizes."""
+    """ccxt market dict + leverage tiers -> SymbolSpec.
+
+    Prefers Binance's authoritative exchangeInfo filters (PRICE_FILTER.tickSize,
+    LOT_SIZE.stepSize, MIN_NOTIONAL.notional) as the source of truth; falls back to
+    ccxt-unified precision/limits if filters are absent. This avoids silently treating a
+    decimal-places precision count as a tick size if ccxt's precisionMode ever changes.
+    """
+    filters = (market.get("info") or {}).get("filters") or []
+    tick = _filter_field(filters, "PRICE_FILTER", "tickSize")
+    step = _filter_field(filters, "LOT_SIZE", "stepSize")
+    min_notional = _filter_field(filters, "MIN_NOTIONAL", "notional")
+    if tick is None:
+        tick = float(market["precision"]["price"])
+    if step is None:
+        step = float(market["precision"]["amount"])
+    if min_notional is None:
+        min_notional = float(market["limits"]["cost"]["min"])
     brackets = [
         MmrBracket(
             notional_floor=float(t["minNotional"]),
@@ -32,9 +57,9 @@ def parse_symbol_spec(market: dict, tiers: list[dict]) -> SymbolSpec:
     ]
     return SymbolSpec(
         symbol=market["id"],
-        tick_size=float(market["precision"]["price"]),
-        step_size=float(market["precision"]["amount"]),
-        min_notional=float(market["limits"]["cost"]["min"]),
+        tick_size=tick,
+        step_size=step,
+        min_notional=min_notional,
         mmr_brackets=brackets,
     )
 
@@ -65,35 +90,36 @@ def parse_funding(fr: dict, interval: dict | None = None) -> FundingInfo:
 
 
 def parse_open_interest_history(rows: list[dict]) -> pd.DataFrame:
-    if not rows:
-        return pd.DataFrame(columns=["timestamp", "oi_amount", "oi_value"])
-    recs = [
-        {
-            "timestamp": pd.to_datetime(int(r["timestamp"]), unit="ms", utc=True),
-            "oi_amount": float(r["openInterestAmount"]),
-            "oi_value": (
-                float(r["openInterestValue"])
-                if r.get("openInterestValue") is not None
-                else float("nan")
-            ),
-        }
-        for r in rows
-    ]
+    cols = ["timestamp", "oi_amount", "oi_value"]
+    recs = []
+    for r in rows:
+        try:
+            recs.append({
+                "timestamp": pd.to_datetime(int(r["timestamp"]), unit="ms", utc=True),
+                "oi_amount": float(r["openInterestAmount"]),
+                "oi_value": (float(r["openInterestValue"])
+                             if r.get("openInterestValue") is not None else float("nan")),
+            })
+        except (KeyError, ValueError, TypeError):
+            continue  # skip a malformed row rather than dropping the whole batch
+    if not recs:
+        return pd.DataFrame(columns=cols)
     return pd.DataFrame(recs).sort_values("timestamp").reset_index(drop=True)
 
 
 def parse_long_short_ratio(raw_rows: list[dict]) -> pd.DataFrame:
-    if not raw_rows:
-        return pd.DataFrame(
-            columns=["timestamp", "long_short_ratio", "long_account", "short_account"]
-        )
-    recs = [
-        {
-            "timestamp": pd.to_datetime(int(r["timestamp"]), unit="ms", utc=True),
-            "long_short_ratio": float(r["longShortRatio"]),
-            "long_account": float(r["longAccount"]),
-            "short_account": float(r["shortAccount"]),
-        }
-        for r in raw_rows
-    ]
+    cols = ["timestamp", "long_short_ratio", "long_account", "short_account"]
+    recs = []
+    for r in raw_rows:
+        try:
+            recs.append({
+                "timestamp": pd.to_datetime(int(r["timestamp"]), unit="ms", utc=True),
+                "long_short_ratio": float(r["longShortRatio"]),
+                "long_account": float(r["longAccount"]),
+                "short_account": float(r["shortAccount"]),
+            })
+        except (KeyError, ValueError, TypeError):
+            continue  # skip a malformed row rather than dropping the whole batch
+    if not recs:
+        return pd.DataFrame(columns=cols)
     return pd.DataFrame(recs).sort_values("timestamp").reset_index(drop=True)

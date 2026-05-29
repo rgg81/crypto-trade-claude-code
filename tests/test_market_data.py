@@ -79,3 +79,32 @@ def test_parse_long_short_ratio_casts_strings():
 def test_parse_open_interest_empty_returns_empty_df():
     df = parse_open_interest_history([])
     assert df.empty
+
+
+def test_parse_symbol_spec_prefers_raw_filters_over_precision():
+    # precision given as decimal-PLACES (8, 3) which would be wrong if used as tick/step;
+    # the raw filters must win and yield correct sizes.
+    market = {
+        **MARKET,
+        "precision": {"price": 8, "amount": 3},
+        "info": {"filters": [
+            {"filterType": "PRICE_FILTER", "tickSize": "0.10"},
+            {"filterType": "LOT_SIZE", "stepSize": "0.001"},
+            {"filterType": "MIN_NOTIONAL", "notional": "100"},
+        ]},
+    }
+    spec = parse_symbol_spec(market, TIERS)
+    assert spec.tick_size == 0.1
+    assert spec.step_size == 0.001
+    assert spec.min_notional == 100.0
+
+
+def test_parse_long_short_ratio_skips_malformed_rows():
+    raw = [
+        {"symbol": "BTCUSDT", "longShortRatio": "1.5", "longAccount": "0.6",
+         "shortAccount": "0.4", "timestamp": "1780000000000"},
+        {"symbol": "BTCUSDT"},  # malformed: missing fields -> skipped, not fatal
+    ]
+    df = parse_long_short_ratio(raw)
+    assert len(df) == 1
+    assert df.iloc[0]["long_short_ratio"] == 1.5

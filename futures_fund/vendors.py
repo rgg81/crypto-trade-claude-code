@@ -109,9 +109,11 @@ def archive_jsonl(path, records: list[dict], key: str = "timestamp") -> int:
     written = 0
     with p.open("a") as f:
         for rec in records:
-            if rec.get(key) in seen:
+            k = rec.get(key)
+            if k is not None and k in seen:
                 continue
             f.write(json.dumps(rec, default=str) + "\n")
-            seen.add(rec.get(key))
+            if k is not None:
+                seen.add(k)
             written += 1
     return written

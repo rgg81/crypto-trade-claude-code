@@ -83,3 +83,9 @@ def test_archive_jsonl_appends_and_dedupes(tmp_path):
     assert archive_jsonl(path, rows2, key="timestamp") == 1
     lines = [json.loads(x) for x in path.read_text().splitlines() if x.strip()]
     assert [r["timestamp"] for r in lines] == [1, 2, 3]
+
+
+def test_archive_jsonl_keeps_rows_without_key(tmp_path):
+    path = tmp_path / "x.jsonl"
+    # records lack the dedup key -> all kept, never silently collapsed to one "None"
+    assert archive_jsonl(path, [{"a": 1}, {"a": 2}], key="timestamp") == 2
