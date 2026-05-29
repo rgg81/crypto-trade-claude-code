@@ -46,6 +46,7 @@ class Settings(BaseModel):
     deep_model: str = "opus"
     quick_model: str = "haiku"
     verdict_horizon_weeks: int = 8
+    live: bool = False  # MUST be explicitly enabled; live also requires a 'graduated' verdict
     exchange: ExchangeSettings = Field(default_factory=ExchangeSettings)
     data: DataSettings = Field(default_factory=DataSettings)
 
