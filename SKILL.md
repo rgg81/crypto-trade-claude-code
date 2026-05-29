@@ -60,3 +60,6 @@ If any `scripts/*` call errors:
 4. Verify (re-run the failed step + the suite), commit the fix on a branch, and append the repair (symptom → root cause → fix → verification) to `memory/repair-journal.md` via `futures_fund.repair.record_repair`.
 5. Resume the cycle from the failed phase, or degrade safely (cap conviction / skip the affected symbol).
 If you cannot fix it safely, set the HALT flag (`futures_fund.state.set_halt`) and surface for human review — bad trades are worse than a paused desk.
+
+## Live mode (default OFF)
+Trading is paper unless `config.live` is true AND `scripts/go_live_check.py` reports a `graduated` verdict (`futures_fund.live_gate.live_allowed`). When live, place orders ONLY via `futures_fund.live_exec.LiveExecutor` with `confirm_live=True`; respect the `futures_fund.ratelimit.WeightLimiter`; run `scripts/monitor_cli.py` between cycles. Never enable live without a graduated verdict — see README "Going live".
