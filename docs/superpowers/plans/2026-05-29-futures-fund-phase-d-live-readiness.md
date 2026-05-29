@@ -229,7 +229,8 @@ def live_allowed(settings: Settings, scorecard: dict) -> bool:
     (The cycle additionally checks the HALT flag.) Survival-first: default-deny."""
     if not getattr(settings, "live", False):
         return False
-    return (scorecard.get("graduation") or {}).get("status") == "graduated"
+    g = scorecard.get("graduation")
+    return isinstance(g, dict) and g.get("status") == "graduated"
 ```
 
 - [ ] **Step 5: Run** `uv run pytest tests/test_live_gate.py tests/test_config.py -v` — expect PASS (live_gate 4 + config still green). Then `uv run ruff check futures_fund/config.py futures_fund/live_gate.py tests/test_live_gate.py`.
@@ -505,7 +506,7 @@ def test_used_weight_reports_current_window():
     rl.allow(40, now=0.0)
     rl.allow(20, now=10.0)
     assert rl.used(now=10.0) == 60
-    assert rl.used(now=71.0) == 20  # the 40 aged out
+    assert rl.used(now=65.0) == 20  # the t=0 event (40) aged out of the 60s window; t=10 (20) survives
 ```
 
 - [ ] **Step 2: Run** `uv run pytest tests/test_ratelimit.py -v` — expect FAIL.
