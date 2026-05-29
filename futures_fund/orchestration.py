@@ -17,10 +17,18 @@ _AGENT_KEY = "team"
 
 
 def preflight_step(exchange, settings: Settings, state_dir, memory_dir,
-                   now: datetime, cycle_no: int) -> dict:
+                   now: datetime, cycle_no: int, http_client=None) -> dict:
     """Phase 0-2: load state, audit exits (BEFORE the halt check so a halt still closes
     stop/tp/liq hits), then build the per-symbol briefs + health/regime for the analysts."""
     ensure_memory_layout(memory_dir)
+    import os
+
+    from futures_fund.market_context import build_market_context
+    if http_client is None:
+        import httpx
+        http_client = httpx.Client(timeout=15.0)
+    market_context = build_market_context(http_client, settings,
+                                          fred_key=os.environ.get(settings.data.fred_key_env))
     account = load_account(state_dir, settings.account_size_usdt)
     positions = load_positions(state_dir)
     report = {"cycle": cycle_no, "halted": False, "opened": 0, "closed": 0,
@@ -36,6 +44,7 @@ def preflight_step(exchange, settings: Settings, state_dir, memory_dir,
                 "open_positions": [{"symbol": p.symbol, "direction": p.direction}
                                    for p in positions],
                 "audit": {"closed": report["closed"], "carried": report["carried"]},
+                "market_context": market_context,
                 "scorecard": build_scorecard(state_dir, memory_dir)}
     health = portfolio_health(account.balance, account.peak_equity, positions, ctx.prices,
                               recent_hit_rate=hit_rate(memory_dir, _AGENT_KEY))
@@ -45,6 +54,14 @@ def preflight_step(exchange, settings: Settings, state_dir, memory_dir,
         b = build_symbol_brief(exchange, s, settings.timeframe)
         b["exchange_id"] = ctx.specs[s].symbol  # raw id (e.g. BTCUSDT) agents MUST use for output
         briefs.append(b)
+    try:
+        from futures_fund.vendors import archive_jsonl
+        for b in briefs:
+            rec = {"ts": now.isoformat(), "symbol": b["exchange_id"],
+                   "oi_value": b.get("oi_value"), "long_short_ratio": b.get("long_short_ratio")}
+            archive_jsonl(f"{settings.data.archive_dir}/derivatives.jsonl", [rec], key="ts")
+    except Exception:
+        pass  # graceful: archiving must never break the cycle
     return {
         "cycle": cycle_no, "halted": False, "equity": health.equity,
         "drawdown_from_peak": health.drawdown_from_peak, "health_tier": health.tier,
@@ -52,6 +69,7 @@ def preflight_step(exchange, settings: Settings, state_dir, memory_dir,
         "open_positions": [{"symbol": p.symbol, "direction": p.direction, "qty": p.qty,
                             "entry": p.entry} for p in positions],
         "audit": {"closed": report["closed"], "carried": report["carried"]},
+        "market_context": market_context,
         "scorecard": scorecard,
     }
 
