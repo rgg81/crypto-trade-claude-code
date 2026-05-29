@@ -9,10 +9,10 @@ DSR_THRESHOLD = 0.95
 def deflated_sharpe_pvalue(returns: list[float], num_trials: int,
                            periods_per_year: float = PERIODS_PER_YEAR) -> float:
     """Probability the desk's Sharpe is genuinely > 0 after deflating for multiple testing
-    (vendored Lopez de Prado DSR). 0.0 if too few observations to judge."""
-    if len(returns) < 3:
+    (vendored Lopez de Prado DSR). 0.0 if < 10 observations (DSR requires backtest_length >= 10)."""
+    if len(returns) < 10:
         return 0.0
-    observed = sharpe(returns, periods_per_year)
+    observed = sharpe(returns, periods_per_year=1.0)
     result = deflated_sharpe_ratio(observed_sr=observed, num_trials=max(1, num_trials),
                                    backtest_length=len(returns))
     return float(result.dsr_pvalue)

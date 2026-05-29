@@ -46,7 +46,7 @@ Run: `uv run python scripts/reflect_cli.py --cycle N` → `state/cycle/N/reflect
 Finally, present the `report.json` to the user: actions taken, current book, equity, risk posture.
 
 ## Subagent dispatch rules
-- Inject `MISSION.md` verbatim at the top of EVERY subagent prompt.
+- Inject `MISSION.md` verbatim AND the cycle scorecard (`state/cycle/N/context.json` → `scorecard`) at the top of EVERY subagent prompt. The scorecard is the desk's statistical self-portrait (equity, return vs the 5%/mo target, drawdown, Sharpe/Sortino, hit-rate, profit factor, per-agent hit-rates, graduation status, and warnings). Every agent must reason WITH these numbers — e.g. bias risk-off in drawdown, size conservatively when the edge is statistically unproven, and never force trades to chase the target.
 - Give each subagent ONLY its role file's inputs + the relevant cycle JSON; never your full context.
 - Each subagent must return ONLY valid JSON matching its contract. If a subagent returns malformed JSON, re-dispatch once with the validation error; if it fails again, log it, skip that symbol/agent, and continue (cap conviction — never trade on missing analysis).
 - Analyst, Research Manager, and Trader subagents MUST set the `symbol` field of their output to the brief's `exchange_id` (the raw id, e.g. `BTCUSDT`), NOT the unified symbol. (The gate also normalizes unified->raw defensively, but emit the raw id.)

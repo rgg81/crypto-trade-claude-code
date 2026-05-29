@@ -30,13 +30,16 @@ def preflight_step(exchange, settings: Settings, state_dir, memory_dir,
                                   agent_key=_AGENT_KEY)
     save_account(state_dir, account)
     save_positions(state_dir, positions)
+    from futures_fund.scorecard import build_scorecard
     if is_halted(state_dir):
         return {"cycle": cycle_no, "halted": True, "briefs": [], "equity": account.balance,
                 "open_positions": [{"symbol": p.symbol, "direction": p.direction}
                                    for p in positions],
-                "audit": {"closed": report["closed"], "carried": report["carried"]}}
+                "audit": {"closed": report["closed"], "carried": report["carried"]},
+                "scorecard": build_scorecard(state_dir, memory_dir)}
     health = portfolio_health(account.balance, account.peak_equity, positions, ctx.prices,
                               recent_hit_rate=hit_rate(memory_dir, _AGENT_KEY))
+    scorecard = build_scorecard(state_dir, memory_dir, monthly_target=0.05)
     briefs = []
     for s in settings.symbols:
         b = build_symbol_brief(exchange, s, settings.timeframe)
@@ -49,6 +52,7 @@ def preflight_step(exchange, settings: Settings, state_dir, memory_dir,
         "open_positions": [{"symbol": p.symbol, "direction": p.direction, "qty": p.qty,
                             "entry": p.entry} for p in positions],
         "audit": {"closed": report["closed"], "carried": report["carried"]},
+        "scorecard": scorecard,
     }
 
 

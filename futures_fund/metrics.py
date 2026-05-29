@@ -22,7 +22,8 @@ def sortino(returns: list[float], periods_per_year: float = PERIODS_PER_YEAR) ->
     downside = arr[arr < 0]
     dd = downside.std(ddof=1) if len(downside) >= 2 else 0.0
     if dd == 0:
-        return float(arr.mean() / 1e-9 * np.sqrt(periods_per_year)) if arr.mean() > 0 else 0.0
+        # no measurable downside: infinite Sortino if net positive, else 0 (like profit_factor)
+        return float("inf") if arr.mean() > 0 else 0.0
     return float(arr.mean() / dd * np.sqrt(periods_per_year))
 
 
