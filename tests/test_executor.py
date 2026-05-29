@@ -50,5 +50,5 @@ def test_open_position_applies_entry_slippage_and_returns_fee():
 def test_close_at_mark_realizes_pnl_net_of_fee():
     pos = _pos("BTCUSDT", "long")  # qty 0.5 entry 100
     ct = close_at_mark(pos, mark=110.0, funding_rate=0.0, funding_events=0, slippage_bps=0)
-    assert ct.reason == "stop"  # close_at_mark uses a synthetic 'decision' exit reason? see impl
+    assert ct.reason == "close"
     assert ct.realized_pnl == pytest.approx(0.5 * (110.0 - 100.0) - ct.exit_fee)

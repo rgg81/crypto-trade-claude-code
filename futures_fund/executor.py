@@ -49,7 +49,7 @@ def close_at_mark(
     slippage_bps: float, pay_bnb: bool = False,
 ) -> ClosedTrade:
     """Discretionary close at the current mark (used when the team exits a position by decision
-    rather than a stop/tp/liq trigger). Reason is recorded as 'stop' for ledger uniformity."""
+    rather than a stop/tp/liq trigger). Reason is recorded as 'close' for discretionary exits."""
     side = close_side(position.direction)
     exit_fill = fill_price(mark, side, slippage_bps)
     if position.direction == "long":
@@ -62,7 +62,7 @@ def close_at_mark(
     slippage = abs(exit_fill - mark) * position.qty
     return ClosedTrade(
         symbol=position.symbol, direction=position.direction, decision_id=position.decision_id,
-        entry=position.entry, exit_price=exit_fill, qty=position.qty, reason="stop",
+        entry=position.entry, exit_price=exit_fill, qty=position.qty, reason="close",
         gross_pnl=gross, exit_fee=exit_fee, funding=funding, slippage=slippage,
         realized_pnl=gross - exit_fee - funding,
     )

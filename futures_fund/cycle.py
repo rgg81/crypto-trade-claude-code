@@ -5,10 +5,12 @@ from datetime import datetime
 from futures_fund.baseline import propose, simple_regime
 from futures_fund.config import Settings
 from futures_fund.consolidation import consolidate, cvar_risk_multiplier
+from futures_fund.costs import count_funding_events
 from futures_fund.executor import close_at_mark, open_position, reconcile
 from futures_fund.exits import detect_exit
 from futures_fund.hitrate import hit_rate, record_outcome
 from futures_fund.journal import append_decision, patch_outcome, read_all_decisions
+from futures_fund.liquidation import liquidation_price, mmr_for_notional
 from futures_fund.memory_layout import ensure_memory_layout
 from futures_fund.policy import caps_for
 from futures_fund.portfolio import portfolio_health
@@ -26,10 +28,6 @@ _BASELINE = "baseline"
 _SLIPPAGE_BPS = 2.0
 
 
-def _hours_held(opened_ts: datetime, now: datetime) -> float:
-    return max(0.0, (now - opened_ts).total_seconds() / 3600.0)
-
-
 def _recent_returns(memory_dir, equity: float) -> list[float]:
     pnls = [d["realized_pnl"] for d in read_all_decisions(memory_dir)
             if d.get("realized_pnl") is not None]
@@ -45,27 +43,31 @@ def run_cycle(exchange, settings: Settings, state_dir, memory_dir,
     account = load_account(state_dir, settings.account_size_usdt)
     positions = load_positions(state_dir)
     report = {"cycle": cycle_no, "halted": False, "opened": 0, "closed": 0,
-              "equity": account.balance, "actions": []}
+              "carried": 0, "equity": account.balance, "actions": []}
     if is_halted(state_dir):
         report["halted"] = True
         return report
 
+    # Fetch market data once; build spec/price maps keyed by unified symbol and raw id.
     frames = {s: exchange.ohlcv(s, settings.timeframe) for s in settings.symbols}
     fundings = {s: exchange.funding(s) for s in settings.symbols}
+    specs = {s: exchange.symbol_spec(s) for s in settings.symbols}
+    raw_to_unified = {specs[s].symbol: s for s in settings.symbols}
+    specs_by_raw = {specs[s].symbol: specs[s] for s in settings.symbols}
+    prices = {specs[s].symbol: float(frames[s]["close"].iloc[-1]) for s in settings.symbols}
 
-    # Phase 1 — audit & reflect: close positions whose latest bar hit stop/tp/liq
+    # Phase 1 — audit & reflect: close positions whose latest bar hit stop/tp/liq.
     still_open: list[Position] = []
     for p in positions:
-        sym = next(
-            (s for s in settings.symbols if exchange.symbol_spec(s).symbol == p.symbol), None
-        )
-        df = frames.get(sym) if sym else None
-        if df is None:
+        sym = raw_to_unified.get(p.symbol)
+        if sym is None:
+            # unconfigured/unpriceable symbol -> carry forward, never fabricate a close
             still_open.append(p)
+            report["carried"] += 1
             continue
-        bar = df.iloc[-1]
+        bar = frames[sym].iloc[-1]
         fr = fundings[sym]
-        n_events = int(_hours_held(p.opened_ts, now) // fr.interval_hours)
+        n_events = count_funding_events(p.opened_ts, now, int(fr.interval_hours))
         ct = detect_exit(p, bar_high=float(bar["high"]), bar_low=float(bar["low"]),
                          funding_rate=fr.current_rate, funding_events=n_events,
                          slippage_bps=_SLIPPAGE_BPS)
@@ -85,14 +87,9 @@ def run_cycle(exchange, settings: Settings, state_dir, memory_dir,
     positions = still_open
 
     # Phase 2 — regime + portfolio health
-    prices = {
-        exchange.symbol_spec(s).symbol: float(frames[s]["close"].iloc[-1])
-        for s in settings.symbols
-    }
     health = portfolio_health(account.balance, account.peak_equity, positions, prices,
                               recent_hit_rate=hit_rate(memory_dir, _BASELINE))
-    btc_df = frames[settings.symbols[0]]
-    caps = caps_for(simple_regime(btc_df), health)
+    caps = caps_for(simple_regime(frames[settings.symbols[0]]), health)
     report["equity"] = health.equity
 
     # Phases 3-7 — watcher (configured symbols) -> baseline proposals -> risk gate
@@ -100,9 +97,8 @@ def run_cycle(exchange, settings: Settings, state_dir, memory_dir,
                    "entry": p.entry, "stop": p.stop} for p in positions]
     approved = []
     for s in settings.symbols:
-        spec = exchange.symbol_spec(s)
-        prop = propose(spec.symbol, frames[s], fundings[s].current_rate,
-                       horizon_hours=4.0)
+        spec = specs[s]
+        prop = propose(spec.symbol, frames[s], fundings[s].current_rate, horizon_hours=4.0)
         if prop is None:
             continue
         decision = evaluate(GateInputs(
@@ -119,28 +115,41 @@ def run_cycle(exchange, settings: Settings, state_dir, memory_dir,
     # Phase 9 — execution (reconcile + fills + journal Phase-1)
     target = {st.proposal.symbol: st for st in book}
     to_open, to_close = reconcile(target, positions)
+    closed_syms: set[str] = set()
     for p in to_close:
-        ct = close_at_mark(p, prices.get(p.symbol, p.entry), funding_rate=0.0,
-                           funding_events=0, slippage_bps=_SLIPPAGE_BPS)
+        sym = raw_to_unified.get(p.symbol)
+        if sym is None or p.symbol not in prices:
+            continue  # unpriceable -> carry forward (left in positions), do not fabricate a close
+        fr = fundings[sym]
+        n_events = count_funding_events(p.opened_ts, now, int(fr.interval_hours))
+        ct = close_at_mark(p, prices[p.symbol], funding_rate=fr.current_rate,
+                           funding_events=n_events, slippage_bps=_SLIPPAGE_BPS)
         account.balance += ct.realized_pnl
         report["closed"] += 1
+        closed_syms.add(p.symbol)
+        report["actions"].append({"close": p.symbol, "reason": "close", "pnl": ct.realized_pnl})
         if p.decision_id:
             patch_outcome(memory_dir, p.decision_id, {
                 "exit_ts": now, "realized_pnl": ct.realized_pnl, "fees": ct.exit_fee,
-                "prediction_correct": ct.realized_pnl > 0,
+                "funding_paid": ct.funding, "prediction_correct": ct.realized_pnl > 0,
             })
             record_outcome(memory_dir, _BASELINE, ct.realized_pnl > 0)
-    keep = [p for p in positions if p not in to_close]
+    keep = [p for p in positions if p.symbol not in closed_syms]
+    report["carried"] += sum(1 for p in to_close if p.symbol not in closed_syms)
     for st in to_open:
+        spec = specs_by_raw[st.proposal.symbol]
         did = append_decision(memory_dir, {
             "ts": now, "cycle": cycle_no, "symbol": st.proposal.symbol,
             "direction": st.proposal.direction, "entry": st.proposal.entry,
-            "stop": st.proposal.stop,
-            "take_profit": st.proposal.take_profits, "size": st.qty, "leverage": st.leverage,
-            "funding_at_entry": st.proposal.funding_rate, "confidence": st.proposal.confidence,
-            "dominant_signal": "baseline-momentum", "contributing_agents": [_BASELINE],
+            "stop": st.proposal.stop, "take_profit": st.proposal.take_profits, "size": st.qty,
+            "leverage": st.leverage, "funding_at_entry": st.proposal.funding_rate,
+            "confidence": st.proposal.confidence, "dominant_signal": "baseline-momentum",
+            "contributing_agents": [_BASELINE],
         })
         pos, entry_fee = open_position(st, cycle_no, now, _SLIPPAGE_BPS, decision_id=did)
+        mmr, maint = mmr_for_notional(pos.qty * pos.entry, spec.mmr_brackets)
+        liq = liquidation_price(pos.entry, pos.qty, pos.margin, pos.direction, mmr, maint)
+        pos = pos.model_copy(update={"liq_price": liq})
         account.balance -= entry_fee
         keep.append(pos)
         report["opened"] += 1

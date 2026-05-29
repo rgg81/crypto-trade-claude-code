@@ -9,7 +9,7 @@ from futures_fund.fills import close_side, fill_price
 from futures_fund.models import Direction
 from futures_fund.state import Position
 
-ExitReason = Literal["liquidation", "stop", "take_profit"]
+ExitReason = Literal["liquidation", "stop", "take_profit", "close"]
 
 
 class ClosedTrade(BaseModel):
