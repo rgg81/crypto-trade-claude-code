@@ -111,6 +111,11 @@ def execute_proposals(  # noqa: PLR0912
     open_dicts = [{"symbol": p.symbol, "direction": p.direction, "qty": p.qty,
                    "entry": p.entry, "stop": p.stop} for p in positions]
 
+    from futures_fund.equity_log import period_return
+    daily_pnl = period_return(state_dir, now, 1)
+    weekly_pnl = period_return(state_dir, now, 7)
+    monthly_pnl = period_return(state_dir, now, 30)
+
     approved = []
     vetoed: list = []
     for prop in proposals:
@@ -120,7 +125,9 @@ def execute_proposals(  # noqa: PLR0912
         unified = ctx.raw_to_unified[prop.symbol]
         decision = evaluate(GateInputs(proposal=prop, spec=spec,
                                        regime=simple_regime(ctx.frames[unified]),
-                                       health=health, open_positions=open_dicts))
+                                       health=health, open_positions=open_dicts,
+                                       daily_pnl_pct=daily_pnl, weekly_pnl_pct=weekly_pnl,
+                                       monthly_pnl_pct=monthly_pnl))
         if decision.verdict in ("approve", "resize") and decision.sized_trade is not None:
             approved.append(decision.sized_trade)
         else:
