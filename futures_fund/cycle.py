@@ -5,7 +5,12 @@ from datetime import datetime
 
 from futures_fund.baseline import propose, simple_regime
 from futures_fund.config import Settings
-from futures_fund.consolidation import consolidate, cvar_risk_multiplier, position_risk
+from futures_fund.consolidation import (
+    cluster_scale,
+    consolidate,
+    cvar_risk_multiplier,
+    position_risk,
+)
 from futures_fund.costs import count_funding_events
 from futures_fund.executor import close_at_mark, open_position, reconcile
 from futures_fund.exits import detect_exit
@@ -92,12 +97,35 @@ def audit_and_reflect(ctx: CycleContext, positions: list[Position], account: Acc
     return still_open
 
 
+def _returns_corr(frames, raw_to_unified) -> dict:
+    """Pairwise log-return correlation keyed by RAW symbol, from the cycle's OHLCV frames —
+    feeds the correlated-as-one cluster cap. Missing pairs default to 0 (uncorrelated)."""
+    import numpy as np
+    series: dict = {}
+    for raw, uni in raw_to_unified.items():
+        df = frames.get(uni)
+        if df is not None and len(df) > 6:
+            series[raw] = np.diff(np.log(df["close"].to_numpy(dtype=float)))
+    out: dict = {}
+    syms = list(series)
+    for i in range(len(syms)):
+        for j in range(i + 1, len(syms)):
+            a, b = syms[i], syms[j]
+            m = min(len(series[a]), len(series[b]))
+            if m > 6:
+                r = float(np.corrcoef(series[a][-m:], series[b][-m:])[0, 1])
+                if r == r:  # exclude NaN (flat series)
+                    out[(a, b)] = r
+    return out
+
+
 def execute_proposals(  # noqa: PLR0912
         ctx: CycleContext, proposals: list[TradeProposal], contributing_agents: list[str],
         positions: list[Position], account: AccountState, state_dir, memory_dir,
         now: datetime, cycle_no: int, report: dict | None = None,
         agent_key: str = _BASELINE, rationale_by_symbol: dict | None = None,
-        close_absent: bool = True, force_close: set[str] | None = None) -> dict:
+        close_absent: bool = True, force_close: set[str] | None = None,
+        prediction_by_symbol: dict | None = None) -> dict:
     """Phases 7-10 for a given set of trade proposals (from the baseline OR the agent team):
     risk-gate each proposal, consolidate to a book, reconcile/execute, journal, persist.
     Reusable by both the baseline cycle and the Phase-B agent cycle.
@@ -206,6 +234,17 @@ def execute_proposals(  # noqa: PLR0912
     if stranded:
         report["stranded"] = stranded  # e.g. delisted/unpriceable holdings an operator must flatten
 
+    # Correlated-as-one: never let correlated same-direction bets (held + new) pile into one
+    # oversized directional position. A correlated cluster may use at most ~half the heat budget.
+    cluster_cap = max(caps.per_trade_risk_pct, 0.5 * caps.max_heat)
+    held_dicts = [{"symbol": p.symbol, "direction": p.direction, "qty": p.qty,
+                   "entry": p.entry, "stop": p.stop} for p in keep]
+    _before = len(to_open)
+    to_open = cluster_scale(to_open, held_dicts, health.equity,
+                            _returns_corr(ctx.frames, ctx.raw_to_unified), cluster_cap)
+    if len(to_open) < _before:
+        report["cluster_trimmed"] = _before - len(to_open)
+
     for st in to_open:
         spec = ctx.specs_by_raw[st.proposal.symbol]
         did = append_decision(memory_dir, {
@@ -216,6 +255,7 @@ def execute_proposals(  # noqa: PLR0912
             "confidence": st.proposal.confidence, "dominant_signal": contributing_agents[0]
             if contributing_agents else "unknown", "contributing_agents": contributing_agents,
             "rationale": (rationale_by_symbol or {}).get(st.proposal.symbol),
+            "falsifiable_prediction": (prediction_by_symbol or {}).get(st.proposal.symbol),
         })
         pos, entry_fee = open_position(st, cycle_no, now, _SLIPPAGE_BPS, decision_id=did)
         mmr, maint = mmr_for_notional(pos.qty * pos.entry, spec.mmr_brackets)

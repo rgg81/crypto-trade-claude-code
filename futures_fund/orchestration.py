@@ -200,6 +200,7 @@ def gate_execute_step(exchange, settings: Settings, state_dir, memory_dir,
     # stop) must never abort the gate phase and leave holdings unmanaged — drop it and continue.
     trade_props = []
     rationale_by_symbol: dict = {}
+    prediction_by_symbol: dict = {}
     dropped = 0
     for p in proposals:
         try:
@@ -215,10 +216,12 @@ def gate_execute_step(exchange, settings: Settings, state_dir, memory_dir,
             continue
         trade_props.append(tp)
         rationale_by_symbol[raw] = ap.rationale
+        prediction_by_symbol[raw] = ap.falsifiable_prediction
     report = execute_proposals(ctx, trade_props, contributing_agents=["research_manager", "trader"],
                                positions=positions, account=account, state_dir=state_dir,
                                memory_dir=memory_dir, now=now, cycle_no=cycle_no,
                                agent_key=_AGENT_KEY, rationale_by_symbol=rationale_by_symbol,
+                               prediction_by_symbol=prediction_by_symbol,
                                close_absent=not has_review, force_close=force_close)
     report["dropped"] = dropped
     report["trailed"] = trailed

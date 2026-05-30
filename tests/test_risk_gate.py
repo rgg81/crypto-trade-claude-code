@@ -63,6 +63,16 @@ def test_bad_rr_is_vetoed():
     assert "rr" in d.reason.lower() or "reward" in d.reason.lower()
 
 
+def test_exactly_2r_is_not_vetoed_by_float_error():
+    # NEAR cycle-2 case: reward/risk is mathematically 2.0 but floats to 1.9999999999999993.
+    # The float tolerance must let it through instead of a spurious "RR < 2.0" veto.
+    p = _proposal(direction="short", entry=2.403, stop=2.692, tps=(1.825,))
+    import futures_fund.risk_gate as rg
+    assert rg._reward_risk(p) < 2.0  # genuinely floats under
+    d = evaluate(_inputs(proposal=p, spec=_spec().model_copy(update={"min_notional": 1.0})))
+    assert d.verdict != "veto" or "rr" not in d.reason.lower()  # NOT an RR veto
+
+
 def test_heat_cap_resizes_when_existing_exposure_high():
     # Pre-existing 9% heat, cap 10% -> new 1.5% trade must be resized down to fit.
     existing = [dict(symbol="ETHUSDT", direction="long", qty=180.0, entry=100.0, stop=95.0)]  # 9%

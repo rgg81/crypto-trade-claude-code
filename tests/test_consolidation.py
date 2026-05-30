@@ -1,7 +1,8 @@
 import pytest
 
-from futures_fund.consolidation import consolidate, cvar_risk_multiplier
+from futures_fund.consolidation import cluster_scale, consolidate, cvar_risk_multiplier
 from futures_fund.models import CostEstimate, SizedTrade, TradeProposal
+from futures_fund.portfolio_risk import position_risk
 
 
 def _sized(symbol, qty, entry=100.0, stop=95.0, direction="long"):
@@ -10,6 +11,44 @@ def _sized(symbol, qty, entry=100.0, stop=95.0, direction="long"):
                          horizon_hours=4, funding_rate=0.0)
     return SizedTrade(proposal=prop, qty=qty, notional=entry * qty, leverage=5.0,
                       margin=entry * qty / 5.0, liq_price=82.0, cost=CostEstimate())
+
+
+def _heat(trades, eq):
+    return sum(position_risk(t.qty, t.proposal.entry, t.proposal.stop, eq) for t in trades)
+
+
+def test_cluster_scale_trims_correlated_same_direction_cluster():
+    # 3 perfectly-correlated longs, each 2% risk (qty 40, |100-95|=5 -> 40*5/10000=2%) -> 6%.
+    eq = 10_000.0
+    trades = [_sized(s, 40.0) for s in ("AAA", "BBB", "CCC")]
+    corr = {("AAA", "BBB"): 1.0, ("AAA", "CCC"): 1.0, ("BBB", "CCC"): 1.0}
+    out = cluster_scale(trades, held=[], equity=eq, corr=corr, cluster_cap=0.03)  # cap 3%
+    assert _heat(out, eq) == pytest.approx(0.03, abs=1e-6)  # cluster trimmed to the 3% cap
+
+
+def test_cluster_scale_leaves_uncorrelated_alone():
+    eq = 10_000.0
+    trades = [_sized(s, 40.0) for s in ("AAA", "BBB", "CCC")]  # 2% each, 6% total
+    out = cluster_scale(trades, held=[], equity=eq, corr={}, cluster_cap=0.03)  # all uncorrelated
+    assert _heat(out, eq) == pytest.approx(0.06, abs=1e-6)  # each is its own cluster < cap
+
+
+def test_cluster_scale_reserves_held_heat_in_the_cluster():
+    # A held long (2%) correlated with a new long (2%); cap 3% -> new must trim to 1%.
+    eq = 10_000.0
+    held = [{"symbol": "AAA", "direction": "long", "qty": 40.0, "entry": 100.0, "stop": 95.0}]
+    new = [_sized("BBB", 40.0)]
+    out = cluster_scale(new, held=held, equity=eq, corr={("AAA", "BBB"): 0.9}, cluster_cap=0.03)
+    assert _heat(out, eq) == pytest.approx(0.01, abs=1e-6)  # 3% cap - 2% held = 1% for the new
+
+
+def test_cluster_scale_ignores_opposite_direction():
+    # A held long and a new short are NOT one cluster even if correlated -> no trim.
+    eq = 10_000.0
+    held = [{"symbol": "AAA", "direction": "long", "qty": 40.0, "entry": 100.0, "stop": 95.0}]
+    new = [_sized("BBB", 40.0, direction="short", stop=105.0)]
+    out = cluster_scale(new, held=held, equity=eq, corr={("AAA", "BBB"): 0.99}, cluster_cap=0.03)
+    assert _heat(out, eq) == pytest.approx(0.02, abs=1e-6)  # untouched (different direction)
 
 
 def test_cvar_multiplier_derisks_on_bad_tail():

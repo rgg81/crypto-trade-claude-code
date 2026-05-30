@@ -292,6 +292,26 @@ def test_malformed_proposal_dropped_others_proceed(tmp_path):
     assert report["opened"] == 1 and report["dropped"] >= 1
 
 
+def test_falsifiable_prediction_is_journaled_at_entry(tmp_path):
+    # The RM's falsifiable_prediction must persist into the decision journal so the later
+    # HOLD/CLOSE review can test it (previously it was dropped -> holding card showed null).
+    from futures_fund.journal import read_open_decisions
+    state_dir, memory_dir = tmp_path / "s", tmp_path / "m"
+    ex = FakeExchange({"BTC/USDT:USDT": _uptrend()})
+    pf = preflight_step(ex, _settings(), state_dir, memory_dir,
+                        now=dt.datetime(2026, 3, 1, tzinfo=UTC), cycle_no=1,
+                        http_client=_HttpClient())
+    last = pf["briefs"][0]["last_close"]
+    proposals = [{"symbol": "BTCUSDT", "direction": "long", "entry": last, "stop": last - 4.0,
+                  "take_profits": [last + 8.0], "atr": 2.0, "confidence": 0.7, "rationale": "x",
+                  "falsifiable_prediction": "BTC makes a higher high within 6 cycles"}]
+    gate_execute_step(ex, _settings(), state_dir, memory_dir,
+                      now=dt.datetime(2026, 3, 1, tzinfo=UTC), cycle_no=1, proposals=proposals)
+    decs = read_open_decisions(memory_dir)
+    assert len(decs) == 1
+    assert decs[0]["falsifiable_prediction"] == "BTC makes a higher high within 6 cycles"
+
+
 def test_empty_universe_stands_down(tmp_path):
     # Audit fix [11]: an empty universe (failed scan / degenerate picks) must stand down, not crash.
     from futures_fund.config import Settings

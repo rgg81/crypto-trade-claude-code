@@ -18,6 +18,7 @@ from futures_fund.portfolio_risk import position_risk
 from futures_fund.sizing import choose_leverage, liq_distance_ratio, qty_from_risk
 
 MIN_RR = 2.0
+_RR_EPS = 1e-6  # float tolerance so an exactly-2R proposal isn't vetoed by rounding
 MIN_LIQ_DISTANCE_MULT = 2.5
 
 
@@ -72,9 +73,9 @@ def evaluate(inp: GateInputs) -> RiskDecision:
     if not breaker.allow_new_entries:
         return RiskDecision(verdict="veto", reason=f"circuit breaker: {breaker.reason}")
 
-    # 2. Reward:risk
+    # 2. Reward:risk (tolerate float error so an intended exactly-2R trade isn't vetoed)
     rr = _reward_risk(p)
-    if rr < MIN_RR:
+    if rr < MIN_RR - _RR_EPS:
         return RiskDecision(verdict="veto", reason=f"RR {rr:.2f} < min {MIN_RR}")
 
     # 3. Effective per-trade risk budget (caps × breaker multiplier)
