@@ -34,7 +34,7 @@ def consolidate(
     trades = [_scale(t, cvar_mult) for t in approved] if cvar_mult != 1.0 else list(approved)
 
     def risk(t: SizedTrade) -> float:
-        return position_risk(t.qty, t.proposal.entry, t.proposal.stop, equity)
+        return position_risk(t.qty, t.proposal.entry, t.proposal.stop, equity, t.proposal.direction)
 
     total = sum(risk(t) for t in trades)
     if total > max_heat and total > 0:
@@ -58,10 +58,12 @@ def cluster_scale(
     rows = []  # (symbol, direction, risk_frac, is_new, new_idx)
     for p in held:
         rows.append((p["symbol"], p["direction"],
-                     position_risk(p["qty"], p["entry"], p["stop"], equity), False, -1))
+                     position_risk(p["qty"], p["entry"], p["stop"], equity, p["direction"]),
+                     False, -1))
     for i, t in enumerate(new_trades):
         rows.append((t.proposal.symbol, t.proposal.direction,
-                     position_risk(t.qty, t.proposal.entry, t.proposal.stop, equity), True, i))
+                     position_risk(t.qty, t.proposal.entry, t.proposal.stop, equity,
+                                   t.proposal.direction), True, i))
     n = len(rows)
     parent = list(range(n))
 
@@ -94,4 +96,5 @@ def cluster_scale(
 
     scaled = [_scale(t, factor[i]) for i, t in enumerate(new_trades)]
     return [t for t in scaled
-            if position_risk(t.qty, t.proposal.entry, t.proposal.stop, equity) >= min_risk_frac]
+            if position_risk(t.qty, t.proposal.entry, t.proposal.stop, equity,
+                             t.proposal.direction) >= min_risk_frac]

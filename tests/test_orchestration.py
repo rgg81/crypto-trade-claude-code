@@ -217,14 +217,24 @@ def test_holdings_review_ignores_loosening_stop(tmp_path):
     assert load_positions(state_dir)[0].stop == 90.0
 
 
-def test_holdings_review_rejects_profit_lock_above_entry(tmp_path):
-    # The Position model defines a stop as a loss-limit (long stop < entry). A trail ABOVE entry
-    # (a profit-lock) is not representable, so it must be rejected gracefully — never crash.
-    state_dir, memory_dir, ex = _seed_holding(tmp_path)  # ETH long entry 100
+def test_holdings_review_trails_profit_lock_above_entry(tmp_path):
+    # Winning long (entry 100, mark ~147): trail the stop ABOVE entry to 110 to LOCK PROFIT.
+    state_dir, memory_dir, ex = _seed_holding(tmp_path)  # ETH long entry 100, stop 90
     report = gate_execute_step(
         ex, _settings(), state_dir, memory_dir, now=dt.datetime(2026, 3, 1, tzinfo=UTC),
         cycle_no=2, proposals=[],
         management=[{"symbol": "ETHUSDT", "action": "hold", "new_stop": 110.0}])
+    assert report["trailed"] == 1
+    assert load_positions(state_dir)[0].stop == 110.0  # profit-locking stop above entry
+
+
+def test_holdings_review_rejects_trail_past_mark(tmp_path):
+    # A stop beyond the current mark (~147) would instantly stop out — reject it gracefully.
+    state_dir, memory_dir, ex = _seed_holding(tmp_path)  # ETH long, mark ~147
+    report = gate_execute_step(
+        ex, _settings(), state_dir, memory_dir, now=dt.datetime(2026, 3, 1, tzinfo=UTC),
+        cycle_no=2, proposals=[],
+        management=[{"symbol": "ETHUSDT", "action": "hold", "new_stop": 200.0}])
     assert report["trailed"] == 0 and load_positions(state_dir)[0].stop == 90.0
 
 

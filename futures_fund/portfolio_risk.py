@@ -3,16 +3,27 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 
-def position_risk(qty: float, entry: float, stop: float, equity: float) -> float:
-    """Per-trade risk as a fraction of equity (loss if stopped out)."""
+def position_risk(qty: float, entry: float, stop: float, equity: float,
+                  direction: str | None = None) -> float:
+    """Per-trade DOWNSIDE risk as a fraction of equity (loss if stopped out). A profit-locked
+    stop — above entry for a long, below entry for a short — has NO downside, so it returns 0
+    (it cannot consume heat budget). Without `direction` it falls back to the absolute stop
+    distance (legacy; correct only for loss-side stops)."""
     if equity <= 0:
         return 0.0
-    return abs(qty) * abs(entry - stop) / equity
+    if direction == "long":
+        loss = max(0.0, entry - stop)
+    elif direction == "short":
+        loss = max(0.0, stop - entry)
+    else:
+        loss = abs(entry - stop)
+    return abs(qty) * loss / equity
 
 
 def portfolio_heat(positions: list[dict], equity: float) -> float:
     """Sum of per-trade risks across all open positions, as a fraction of equity."""
-    return sum(position_risk(p["qty"], p["entry"], p["stop"], equity) for p in positions)
+    return sum(position_risk(p["qty"], p["entry"], p["stop"], equity, p.get("direction"))
+               for p in positions)
 
 
 def _corr(corr: Mapping[tuple[str, str], float], a: str, b: str) -> float:
@@ -55,5 +66,6 @@ def cluster_heat(
     out: dict[int, float] = {}
     for idx, p in enumerate(positions):
         root = find(idx)
-        out[root] = out.get(root, 0.0) + position_risk(p["qty"], p["entry"], p["stop"], equity)
+        out[root] = out.get(root, 0.0) + position_risk(p["qty"], p["entry"], p["stop"], equity,
+                                                       p.get("direction"))
     return out

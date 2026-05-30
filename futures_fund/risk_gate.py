@@ -87,7 +87,7 @@ def evaluate(inp: GateInputs) -> RiskDecision:
     #    correlation cluster's heat, so no unsafe trade slips through. Cluster-aware capping
     #    (treating correlated positions as one) is the Portfolio Manager's job (stage 6, A3).
     equity = inp.health.equity
-    used_heat = sum(position_risk(x["qty"], x["entry"], x["stop"], equity)
+    used_heat = sum(position_risk(x["qty"], x["entry"], x["stop"], equity, x.get("direction"))
                     for x in inp.open_positions)
     headroom = max(0.0, caps.max_heat - used_heat)
     if headroom <= 0:

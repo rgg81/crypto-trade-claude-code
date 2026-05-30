@@ -188,11 +188,12 @@ def gate_execute_step(exchange, settings: Settings, state_dir, memory_dir,
             continue
         if m and m.get("action") == "hold" and m.get("new_stop") is not None:
             ns = float(m["new_stop"])
-            # Trail only TIGHTER, and only within the model's invariant: a stop is a loss-limit,
-            # so it must stay between entry and the current stop (long: below entry; short: above).
-            # A profit-lock stop past entry is not representable in the Position model (see below).
-            tighter = (p.direction == "long" and p.entry > ns > p.stop) or \
-                      (p.direction == "short" and p.entry < ns < p.stop)
+            mark = ctx.prices.get(p.symbol)
+            # Trail only TIGHTER and short of the current mark — so a winning long can lock profit
+            # ABOVE entry and a winning short BELOW entry (a stop past mark would insta-stop).
+            tighter = mark is not None and (
+                (p.direction == "long" and p.stop < ns < mark) or
+                (p.direction == "short" and mark < ns < p.stop))
             if tighter:
                 p = p.model_copy(update={"stop": ns})  # trail only; never loosen
                 trailed += 1

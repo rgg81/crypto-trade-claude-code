@@ -4,7 +4,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field
 
 from futures_fund.models import Direction
 
@@ -23,13 +23,10 @@ class Position(BaseModel):
     opened_ts: datetime
     decision_id: str | None = None
 
-    @model_validator(mode="after")
-    def _check_stop_side(self) -> Position:
-        if self.direction == "long" and self.stop >= self.entry:
-            raise ValueError("long stop must be below entry")
-        if self.direction == "short" and self.stop <= self.entry:
-            raise ValueError("short stop must be above entry")
-        return self
+    # NOTE: a Position's `stop` is NOT constrained to the loss side of entry. At OPEN the stop is
+    # loss-side (enforced on TradeProposal), but a winner's stop may be TRAILED past entry to lock
+    # profit (long stop > entry, short stop < entry). The trail step keeps it tighten-only and
+    # short of the current mark; downside risk of a profit-locked stop is 0 (see position_risk).
 
 
 class AccountState(BaseModel):

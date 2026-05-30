@@ -42,7 +42,7 @@ For each symbol in the debate set (screened ∪ held):
 ### Phase 6 — Trader: new opens + holdings decisions
 Dispatch the **Trader** (opus, `agents/trader.md`):
 - For each **non-held** plan that is not `flat` → one `AgentProposal` (entry, ATR stop, take-profits, confirmation). Place the **first take-profit at ≥ 2.2R** (the gate hard-floors reward:risk at 2.0; aim above it so an intended trade isn't vetoed at the boundary). Carry the RM plan's `falsifiable_prediction` verbatim into the proposal's `falsifiable_prediction` field (it is journaled and tested at the next HOLD/CLOSE review).
-- For each **held** symbol → one management decision `{"symbol": "<raw>", "action": "hold"|"close", "new_stop": <optional tighter stop>, "reason": "..."}`. HOLD may TRAIL the stop tighter (never looser); v1 has no add/trim.
+- For each **held** symbol → one management decision `{"symbol": "<raw>", "action": "hold"|"close", "new_stop": <optional tighter stop>, "reason": "..."}`. HOLD may TRAIL the stop tighter (never looser), including **above entry on a winning long / below entry on a winning short to LOCK PROFIT** — bounded short of the current mark (a stop past mark would insta-stop). A profit-locked stop carries zero downside heat. v1 has no add/trim.
 Write `state/cycle/N/proposals.json` = `{"proposals": [<new opens>], "management": [<holdings decisions>]}`.
 
 ### Phase 7-10 — Risk gate, consolidation, execution (DETERMINISTIC — the Risk & Portfolio Managers)

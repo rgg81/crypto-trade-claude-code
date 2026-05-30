@@ -13,6 +13,19 @@ def _sized(symbol, qty, entry=100.0, stop=95.0, direction="long"):
                       margin=entry * qty / 5.0, liq_price=82.0, cost=CostEstimate())
 
 
+def test_position_risk_is_downside_only_for_profit_locked_stops():
+    eq = 10_000.0
+    # long with a normal loss-side stop: risk is the stop distance
+    assert position_risk(40.0, 100.0, 95.0, eq, "long") == pytest.approx(0.02)
+    # long with a PROFIT-LOCKED stop (above entry): zero downside risk
+    assert position_risk(40.0, 100.0, 110.0, eq, "long") == 0.0
+    # short symmetric: stop below entry = profit-locked = zero
+    assert position_risk(40.0, 100.0, 90.0, eq, "short") == 0.0
+    assert position_risk(40.0, 100.0, 105.0, eq, "short") == pytest.approx(0.02)
+    # no direction -> legacy absolute distance (back-compat)
+    assert position_risk(40.0, 100.0, 110.0, eq) == pytest.approx(0.04)
+
+
 def _heat(trades, eq):
     return sum(position_risk(t.qty, t.proposal.entry, t.proposal.stop, eq) for t in trades)
 

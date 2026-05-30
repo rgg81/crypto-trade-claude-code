@@ -189,7 +189,7 @@ def execute_proposals(  # noqa: PLR0912
     # Reserve gross heat for every carried position that SURVIVES this cycle (kept holdings +
     # any stuck force-close) so new opens get only the remaining headroom under the cap.
     reserved = 0.0 if close_absent else sum(
-        position_risk(p.qty, p.entry, p.stop, health.equity)
+        position_risk(p.qty, p.entry, p.stop, health.equity, p.direction)
         for p in positions if p.symbol not in closeable)
     book = consolidate(approved, health.equity, max(0.0, caps.max_heat - reserved),
                        cvar_mult=cvar_mult)

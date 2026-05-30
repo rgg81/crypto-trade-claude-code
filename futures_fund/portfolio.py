@@ -23,7 +23,7 @@ def total_equity(balance: float, positions: list[Position], prices: dict[str, fl
 
 def open_heat(positions: list[Position], equity: float) -> float:
     """Sum of per-position stop-out risk as a fraction of equity (reuses A1 position_risk)."""
-    return sum(position_risk(p.qty, p.entry, p.stop, equity) for p in positions)
+    return sum(position_risk(p.qty, p.entry, p.stop, equity, p.direction) for p in positions)
 
 
 def portfolio_health(
