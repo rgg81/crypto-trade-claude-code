@@ -27,6 +27,29 @@ def check_positions(positions: list[dict], marks: dict[str, float], *, equity: f
     return {"alerts": alerts, "should_halt": should_halt, "drawdown": drawdown}
 
 
+def position_marks(exchange, positions) -> tuple[dict[str, float], list[str]]:
+    """Mark price for every OPEN position, keyed by its raw symbol — derived from the positions
+    THEMSELVES, not a config symbol list, so a held symbol outside this cycle's dynamic universe
+    is still monitored (the prior bug skipped any holding not in settings.symbols). Returns
+    (marks, unpriced): `unpriced` are holdings we could not price this tick (delisted/unmappable
+    or a transient data error) and are therefore NOT watched — the caller must surface them."""
+    marks: dict[str, float] = {}
+    unpriced: list[str] = []
+    for p in positions:
+        unified = exchange.unified_for_raw(p.symbol)
+        mark = None
+        if unified is not None:
+            try:
+                mark = exchange.mark_price(unified)
+            except Exception:  # noqa: BLE001 — transient data error -> treat as unpriceable
+                mark = None
+        if mark is not None and mark > 0:
+            marks[p.symbol] = float(mark)
+        else:
+            unpriced.append(p.symbol)
+    return marks, unpriced
+
+
 def notify(state_dir, message: str, ts: datetime) -> None:
     """Append a notification (the 'notify' half of auto-execute+notify). A real channel
     (email/Telegram) can tail this file."""
