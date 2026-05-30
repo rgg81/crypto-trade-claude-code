@@ -1,5 +1,6 @@
 # Runtime state & secrets — never commit
 state/
+memory/        # desk's episodic journal/lessons — runtime state, regenerated per run
 .env
 *.key
 
