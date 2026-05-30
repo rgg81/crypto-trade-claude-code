@@ -217,6 +217,17 @@ def test_holdings_review_ignores_loosening_stop(tmp_path):
     assert load_positions(state_dir)[0].stop == 90.0
 
 
+def test_holdings_review_rejects_profit_lock_above_entry(tmp_path):
+    # The Position model defines a stop as a loss-limit (long stop < entry). A trail ABOVE entry
+    # (a profit-lock) is not representable, so it must be rejected gracefully — never crash.
+    state_dir, memory_dir, ex = _seed_holding(tmp_path)  # ETH long entry 100
+    report = gate_execute_step(
+        ex, _settings(), state_dir, memory_dir, now=dt.datetime(2026, 3, 1, tzinfo=UTC),
+        cycle_no=2, proposals=[],
+        management=[{"symbol": "ETHUSDT", "action": "hold", "new_stop": 110.0}])
+    assert report["trailed"] == 0 and load_positions(state_dir)[0].stop == 90.0
+
+
 def _btc_long(entry=147.0):  # a valid new-open proposal on BTC (uptrend last close ~147)
     return {"symbol": "BTCUSDT", "direction": "long", "entry": entry, "stop": entry - 4.0,
             "take_profits": [entry + 8.0], "atr": 2.0, "confidence": 0.7, "rationale": "x"}
