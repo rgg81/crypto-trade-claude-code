@@ -17,13 +17,21 @@ from futures_fund.orchestration import gate_execute_step
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--cycle", type=int, required=True)
+    ap.add_argument("--symbols", default=None,
+                    help="comma-separated unified symbols (the Watcher's picks); overrides "
+                         "config. Held positions are folded in automatically.")
     args = ap.parse_args()
     settings = load_settings()
+    # explicit --symbols (even empty) is the Watcher's universe for this cycle; never the default
+    if args.symbols is not None:
+        syms = [s.strip() for s in args.symbols.split(",") if s.strip()]
+        settings = settings.model_copy(update={"symbols": syms})
     ex = FuturesExchange.from_settings(settings)
-    proposals = load_output("state", args.cycle, "proposals")["proposals"]
+    payload = load_output("state", args.cycle, "proposals")
     report = gate_execute_step(ex, settings, "state", "memory",
                                now=datetime.now(UTC), cycle_no=args.cycle,
-                               proposals=proposals)
+                               proposals=payload.get("proposals", []),
+                               management=payload.get("management"))
     save_output("state", args.cycle, "report", report)
     print(json.dumps(report, indent=2, default=str))
 

@@ -5,8 +5,13 @@ symbol_count: 10
 deep_model: "opus"
 quick_model: "haiku"
 verdict_horizon_weeks: 8
+# live: false => PAPER. Real mainnet market data (public, keyless), simulated execution.
+# The universe is selected dynamically each cycle by the Watcher (scout_cli); `symbols` is only a
+# cold-start fallback if a scan ever fails. Going live additionally requires a 'graduated' verdict;
+# ccxt futures testnet/sandbox is deprecated by Binance, so paper uses real mainnet data.
+live: false
 exchange:
-  testnet: true
+  testnet: false
   key_env: "BINANCE_KEY"
   secret_env: "BINANCE_SECRET"
 data:

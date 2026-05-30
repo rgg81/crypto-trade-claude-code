@@ -64,6 +64,26 @@ def parse_symbol_spec(market: dict, tiers: list[dict]) -> SymbolSpec:
     )
 
 
+def scan_universe(client, top_n: int = 30) -> list[dict]:
+    """Rank the live USD-M linear perp universe by 24h quote volume — the Watcher's scouting
+    pool, recomputed every cycle so the universe rotates with the market. Public/keyless
+    (one fetch_tickers call). Returns up to top_n rows: {symbol, last, chg_24h_pct, vol_24h_usd},
+    most-liquid first. Skips non-USDT-perp symbols and anything with zero volume/price."""
+    tickers = client.fetch_tickers()
+    rows: list[dict] = []
+    for sym, t in tickers.items():
+        if not sym.endswith("/USDT:USDT"):
+            continue
+        qv = t.get("quoteVolume") or 0.0
+        last = t.get("last")
+        if qv and last:
+            rows.append({"symbol": sym, "last": float(last),
+                         "chg_24h_pct": round(float(t.get("percentage") or 0.0), 2),
+                         "vol_24h_usd": float(qv)})
+    rows.sort(key=lambda r: r["vol_24h_usd"], reverse=True)
+    return rows[:top_n]
+
+
 def parse_ohlcv(rows: list[list]) -> pd.DataFrame:
     """ccxt OHLCV rows [[ts_ms,o,h,l,c,v], ...] -> sorted UTC-timestamped DataFrame."""
     df = pd.DataFrame(rows, columns=["ts", "open", "high", "low", "close", "volume"])

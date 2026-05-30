@@ -5,7 +5,31 @@ from futures_fund.market_data import (
     parse_ohlcv,
     parse_open_interest_history,
     parse_symbol_spec,
+    scan_universe,
 )
+
+
+class _TickerClient:
+    def fetch_tickers(self):
+        return {
+            "BTC/USDT:USDT": {"quoteVolume": 1e10, "percentage": 0.1, "last": 70000.0},
+            "DOGE/USDT:USDT": {"quoteVolume": 5e8, "percentage": -2.0, "last": 0.1},
+            "ETH/USDT:USD": {"quoteVolume": 9e9, "percentage": 0.0, "last": 2000.0},  # not perp
+            "FOO/USDT:USDT": {"quoteVolume": 0, "percentage": 0, "last": 1.0},  # zero vol -> skip
+            "BAR/USDT:USDT": {"quoteVolume": 1e9, "percentage": 5.0, "last": None},  # no price
+        }
+
+
+def test_scan_universe_ranks_usdt_perps_by_volume():
+    rows = scan_universe(_TickerClient(), top_n=2)
+    assert [r["symbol"] for r in rows] == ["BTC/USDT:USDT", "DOGE/USDT:USDT"]
+    assert rows[0]["vol_24h_usd"] == 1e10 and rows[0]["chg_24h_pct"] == 0.1
+
+
+def test_scan_universe_excludes_non_perp_and_zero_volume():
+    syms = {r["symbol"] for r in scan_universe(_TickerClient(), top_n=10)}
+    assert "ETH/USDT:USD" not in syms  # spot/quarterly, not a USDT perp
+    assert "FOO/USDT:USDT" not in syms and "BAR/USDT:USDT" not in syms
 
 MARKET = {
     "id": "BTCUSDT",

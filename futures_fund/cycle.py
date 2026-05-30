@@ -5,7 +5,7 @@ from datetime import datetime
 
 from futures_fund.baseline import propose, simple_regime
 from futures_fund.config import Settings
-from futures_fund.consolidation import consolidate, cvar_risk_multiplier
+from futures_fund.consolidation import consolidate, cvar_risk_multiplier, position_risk
 from futures_fund.costs import count_funding_events
 from futures_fund.executor import close_at_mark, open_position, reconcile
 from futures_fund.exits import detect_exit
@@ -14,7 +14,7 @@ from futures_fund.journal import append_decision, patch_outcome, read_all_decisi
 from futures_fund.liquidation import liquidation_price, mmr_for_notional
 from futures_fund.memory_layout import ensure_memory_layout
 from futures_fund.models import TradeProposal
-from futures_fund.policy import caps_for
+from futures_fund.policy import caps_for, circuit_breaker
 from futures_fund.portfolio import portfolio_health
 from futures_fund.risk_gate import GateInputs, evaluate
 from futures_fund.state import (
@@ -96,13 +96,24 @@ def execute_proposals(  # noqa: PLR0912
         ctx: CycleContext, proposals: list[TradeProposal], contributing_agents: list[str],
         positions: list[Position], account: AccountState, state_dir, memory_dir,
         now: datetime, cycle_no: int, report: dict | None = None,
-        agent_key: str = _BASELINE, rationale_by_symbol: dict | None = None) -> dict:
+        agent_key: str = _BASELINE, rationale_by_symbol: dict | None = None,
+        close_absent: bool = True, force_close: set[str] | None = None) -> dict:
     """Phases 7-10 for a given set of trade proposals (from the baseline OR the agent team):
     risk-gate each proposal, consolidate to a book, reconcile/execute, journal, persist.
-    Reusable by both the baseline cycle and the Phase-B agent cycle."""
+    Reusable by both the baseline cycle and the Phase-B agent cycle.
+
+    Holdings-review parameters (agent path):
+    - close_absent=True (baseline): a held position absent from the new target book is closed by
+      reconciliation. close_absent=False (agent path with an explicit holdings review): a holding
+      is closed ONLY when named in `force_close` — universe rotation never churns it, and the
+      gross heat of the kept holdings is reserved from the new-opens budget."""
     if report is None:
         report = {"cycle": cycle_no, "halted": False, "opened": 0, "closed": 0,
                   "carried": 0, "stuck_close": 0, "equity": account.balance, "actions": []}
+    if not ctx.settings.symbols:
+        # Empty universe (failed scan / degenerate Watcher output) -> stand down, never trade.
+        report["stood_down"] = True
+        return report
     health = portfolio_health(account.balance, account.peak_equity, positions, ctx.prices,
                               recent_hit_rate=hit_rate(memory_dir, agent_key))
     # symbols[0] is the market bellwether (convention: BTC first) for the portfolio heat cap;
@@ -136,10 +147,36 @@ def execute_proposals(  # noqa: PLR0912
                            "take_profits": prop.take_profits, "reason": decision.reason})
 
     cvar_mult = cvar_risk_multiplier(_recent_returns(memory_dir, health.equity))
-    book = consolidate(approved, health.equity, caps.max_heat, cvar_mult=cvar_mult)
+    force_close = set(force_close or set())
+    # Hard circuit breaker: a -12% month (or its peers) FLATTENS the entire book — close every
+    # holding at mark this cycle, regardless of the review's per-position verdicts.
+    breaker = circuit_breaker(daily_pnl, weekly_pnl, monthly_pnl, health.drawdown_from_peak)
+    if breaker.force_flatten:
+        force_close |= {p.symbol for p in positions}
+        report["force_flatten"] = breaker.reason
+    # A force_close position is only genuinely closeable if priceable; otherwise it stays open
+    # (stuck) and its heat must still be reserved so the gross-heat cap binds on the REAL book.
+    closeable = {p.symbol for p in positions if p.symbol in force_close
+                 and ctx.raw_to_unified.get(p.symbol) is not None and p.symbol in ctx.prices}
+    # Reserve gross heat for every carried position that SURVIVES this cycle (kept holdings +
+    # any stuck force-close) so new opens get only the remaining headroom under the cap.
+    reserved = 0.0 if close_absent else sum(
+        position_risk(p.qty, p.entry, p.stop, health.equity)
+        for p in positions if p.symbol not in closeable)
+    book = consolidate(approved, health.equity, max(0.0, caps.max_heat - reserved),
+                       cvar_mult=cvar_mult)
 
     target = {st.proposal.symbol: st for st in book}
-    to_open, to_close = reconcile(target, positions)
+    if close_absent:
+        to_open, reconcile_close = reconcile(target, positions)  # baseline: absence/flip closes
+        to_close = list(reconcile_close)
+        to_close += [p for p in positions if p.symbol in force_close and p not in to_close]
+    else:
+        # Explicit holdings review: NEVER re-open or flip a KEPT holding (a HOLD stays as-is);
+        # force-closed symbols are not kept, so a re-proposal on them is a legitimate fresh open.
+        kept = {p.symbol for p in positions if p.symbol not in closeable}
+        to_open = [st for st in book if st.proposal.symbol not in kept]
+        to_close = [p for p in positions if p.symbol in closeable]
     closed_syms: set[str] = set()
     for p in to_close:
         sym = ctx.raw_to_unified.get(p.symbol)
@@ -152,7 +189,8 @@ def execute_proposals(  # noqa: PLR0912
         account.balance += ct.realized_pnl
         report["closed"] += 1
         closed_syms.add(p.symbol)
-        report["actions"].append({"close": p.symbol, "reason": "close", "pnl": ct.realized_pnl})
+        reason = "holdings_close" if p.symbol in force_close else "reconcile"
+        report["actions"].append({"close": p.symbol, "reason": reason, "pnl": ct.realized_pnl})
         if p.decision_id:
             patch_outcome(memory_dir, p.decision_id, {
                 "exit_ts": now, "realized_pnl": ct.realized_pnl, "fees": ct.exit_fee,
@@ -162,6 +200,11 @@ def execute_proposals(  # noqa: PLR0912
     keep = [p for p in positions if p.symbol not in closed_syms]
     # reconcile wanted these closed but they were unpriceable -> stuck open (not a voluntary carry)
     report["stuck_close"] += sum(1 for p in to_close if p.symbol not in closed_syms)
+    # report ACTUAL holdings-review closes (not intent), and any force-close we could NOT execute
+    report["closed_by_review"] = len(force_close & closed_syms)
+    stranded = sorted(force_close - closed_syms)
+    if stranded:
+        report["stranded"] = stranded  # e.g. delisted/unpriceable holdings an operator must flatten
 
     for st in to_open:
         spec = ctx.specs_by_raw[st.proposal.symbol]

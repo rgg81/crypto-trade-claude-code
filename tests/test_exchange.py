@@ -1,6 +1,7 @@
 import pandas as pd
 
-from futures_fund.exchange import FuturesExchange
+from futures_fund.config import Settings
+from futures_fund.exchange import FuturesExchange, build_ccxt, default_symbol_spec
 from futures_fund.market_data import FundingInfo
 from futures_fund.models import SymbolSpec
 
@@ -53,6 +54,47 @@ def test_symbol_spec_wires_market_and_tiers():
     spec = fx.symbol_spec("BTC/USDT:USDT")
     assert isinstance(spec, SymbolSpec)
     assert spec.symbol == "BTCUSDT" and spec.tick_size == 0.1
+    assert spec.mmr_brackets[0].mmr == 0.004  # real authenticated tier is used when keyed
+
+
+class _NoAuthCcxt(FakeCcxt):
+    def fetch_leverage_tiers(self, symbols):
+        raise RuntimeError("binance: leverage tiers require API keys")
+
+
+def test_keyless_symbol_spec_uses_default_bracket_without_calling_tiers():
+    # paper/keyless: leverage tiers are an authenticated endpoint we cannot call. The exchange
+    # must fall back to public exchangeInfo + a conservative default MMR bracket, never raising.
+    fx = FuturesExchange(_NoAuthCcxt(), keyless=True)
+    spec = fx.symbol_spec("BTC/USDT:USDT")
+    assert spec.symbol == "BTCUSDT"
+    assert spec.tick_size == 0.1 and spec.step_size == 0.001 and spec.min_notional == 100.0
+    assert len(spec.mmr_brackets) == 1
+    b = spec.mmr_brackets[0]
+    assert b.mmr == 0.05 and b.max_leverage == 20.0 and b.notional_floor == 0.0
+
+
+def test_default_symbol_spec_from_public_market():
+    market = {"id": "ETHUSDT", "precision": {"price": 0.01, "amount": 0.001},
+              "limits": {"cost": {"min": 5.0}}, "info": {}}
+    spec = default_symbol_spec(market)
+    assert spec.symbol == "ETHUSDT" and spec.tick_size == 0.01
+    assert spec.mmr_brackets[0].mmr == 0.05
+
+
+def test_build_ccxt_paper_is_public_no_keys(monkeypatch):
+    monkeypatch.setenv("BINANCE_KEY", "junk")
+    monkeypatch.setenv("BINANCE_SECRET", "junk")
+    ex = build_ccxt(Settings(live=False))  # paper -> public mainnet, no auth, never sandbox
+    assert not ex.apiKey
+    assert getattr(ex, "urls", {}).get("api") is not None  # mainnet, not sandbox
+
+
+def test_build_ccxt_live_uses_keys(monkeypatch):
+    monkeypatch.setenv("BINANCE_KEY", "abc")
+    monkeypatch.setenv("BINANCE_SECRET", "xyz")
+    ex = build_ccxt(Settings(live=True))
+    assert ex.apiKey == "abc" and ex.secret == "xyz"
 
 
 def test_ohlcv_returns_parsed_dataframe():
