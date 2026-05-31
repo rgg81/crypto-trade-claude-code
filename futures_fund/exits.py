@@ -66,8 +66,11 @@ def detect_exit(
     else:
         gross = position.qty * (position.entry - exit_fill)
     exit_fee = trade_fee(position.qty * exit_fill, maker=False, pay_bnb=pay_bnb)
-    funding = max(0.0, project_funding(position.qty * position.entry, funding_rate,
-                                       position.direction, funding_events))
+    # Signed funding: positive = we PAID it (reduces PnL), negative = we RECEIVED a credit
+    # (raises PnL). Do NOT clamp to 0 — that silently drops carry credits on funding-receiving
+    # trades (a long with negative funding, a short with positive funding).
+    funding = project_funding(position.qty * position.entry, funding_rate,
+                              position.direction, funding_events)
     slippage = abs(exit_fill - level) * position.qty
     realized = gross - exit_fee - funding
     return ClosedTrade(

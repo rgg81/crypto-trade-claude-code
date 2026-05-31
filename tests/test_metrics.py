@@ -26,6 +26,22 @@ def test_sortino_only_penalizes_downside():
     assert sortino([0.01, 0.01]) >= 0
 
 
+def test_sortino_finite_with_single_or_equal_losses():
+    import math
+    ppy = 2190  # 4h bars/year
+    # ONE loss must NOT be infinite (old bug: std of a 1-element subset -> 0 -> inf).
+    s1 = sortino([0.01, 0.02, -0.05, 0.03], periods_per_year=ppy)
+    assert math.isfinite(s1)
+    assert s1 == pytest.approx(0.0025 / 0.025 * math.sqrt(ppy), rel=1e-6)  # dd=sqrt(.05^2/4)=.025
+    # THREE EQUAL losses must NOT be infinite (old bug: std of equal negatives -> 0 -> inf).
+    s2 = sortino([0.03, -0.01, -0.01, -0.01, 0.04], periods_per_year=ppy)
+    dd = math.sqrt(3 * 0.01 ** 2 / 5)
+    assert math.isfinite(s2)
+    assert s2 == pytest.approx(0.008 / dd * math.sqrt(ppy), rel=1e-6)
+    # A genuinely loss-free, net-positive series is still +inf (no measurable downside).
+    assert sortino([0.01, 0.02, 0.0]) == float("inf")
+
+
 def test_max_drawdown_peak_to_trough():
     assert max_drawdown([100, 110, 90, 95, 120]) == pytest.approx((110 - 90) / 110)
 

@@ -19,10 +19,12 @@ def sortino(returns: list[float], periods_per_year: float = PERIODS_PER_YEAR) ->
     if len(returns) < 2:
         return 0.0
     arr = np.asarray(returns, dtype=float)
-    downside = arr[arr < 0]
-    dd = downside.std(ddof=1) if len(downside) >= 2 else 0.0
+    # Downside deviation about the 0 target, as the RMS of the negative parts over ALL N
+    # observations — NOT the sample std of the negative subset (which collapses to 0 for a single
+    # loss or equal losses, spuriously reporting infinite Sortino despite real downside risk).
+    dd = float(np.sqrt(np.mean(np.minimum(arr, 0.0) ** 2)))
     if dd == 0:
-        # no measurable downside: infinite Sortino if net positive, else 0 (like profit_factor)
+        # truly no negative returns: infinite Sortino if net positive, else 0 (like profit_factor)
         return float("inf") if arr.mean() > 0 else 0.0
     return float(arr.mean() / dd * np.sqrt(periods_per_year))
 

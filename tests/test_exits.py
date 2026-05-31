@@ -15,6 +15,24 @@ def _short(**over):
     return p.model_copy(update={"take_profits": [85.0], "liq_price": 118.0, **over})
 
 
+def test_short_receiving_funding_credit_raises_pnl():
+    # A SHORT with a POSITIVE funding rate RECEIVES funding (a credit) -> raises realized PnL.
+    # The old max(0, ...) clamp silently dropped the credit (understating PnL on carry trades).
+    ct = detect_exit(_short(), bar_high=99.0, bar_low=84.0,  # TP 85 fires
+                     funding_rate=0.001, funding_events=2, slippage_bps=0)
+    assert ct.funding == pytest.approx(-0.1)  # 0.5*100 * 0.001 * 2 = 0.1 credit (negative=received)
+    assert ct.funding < 0
+    assert ct.realized_pnl == pytest.approx(ct.gross_pnl - ct.exit_fee - ct.funding)
+
+
+def test_long_receiving_funding_credit_raises_pnl():
+    # A LONG with a NEGATIVE funding rate RECEIVES funding (mirrors our real INJ/HYPE longs).
+    ct = detect_exit(_long(), bar_high=116.0, bar_low=99.0,  # TP 115 fires
+                     funding_rate=-0.001, funding_events=2, slippage_bps=0)
+    assert ct.funding == pytest.approx(-0.1) and ct.funding < 0
+    assert ct.realized_pnl == pytest.approx(ct.gross_pnl - ct.exit_fee - ct.funding)
+
+
 def test_no_trigger_returns_none():
     # bar stays between stop and tp
     assert detect_exit(_long(), bar_high=108.0, bar_low=99.0,

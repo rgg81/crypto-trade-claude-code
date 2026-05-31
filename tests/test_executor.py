@@ -52,3 +52,12 @@ def test_close_at_mark_realizes_pnl_net_of_fee():
     ct = close_at_mark(pos, mark=110.0, funding_rate=0.0, funding_events=0, slippage_bps=0)
     assert ct.reason == "close"
     assert ct.realized_pnl == pytest.approx(0.5 * (110.0 - 100.0) - ct.exit_fee)
+
+
+def test_close_at_mark_credits_received_funding():
+    # holdings-close path: a long with NEGATIVE funding RECEIVES a credit -> raises PnL
+    # (the max(0,...) clamp used to drop it). 0.5*100 * -0.001 * 2 = -0.1 credit.
+    pos = _pos("BTCUSDT", "long")
+    ct = close_at_mark(pos, mark=110.0, funding_rate=-0.001, funding_events=2, slippage_bps=0)
+    assert ct.funding == pytest.approx(-0.1) and ct.funding < 0
+    assert ct.realized_pnl == pytest.approx(0.5 * (110.0 - 100.0) - ct.exit_fee - ct.funding)
