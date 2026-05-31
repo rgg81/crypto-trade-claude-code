@@ -8,7 +8,18 @@ from futures_fund.metrics import (
     profit_factor,
     sharpe,
     sortino,
+    trial_sharpe_std,
 )
+
+
+def test_trial_sharpe_std_needs_two_qualifying_trials():
+    s1 = [0.02, 0.01, 0.02, 0.01, 0.02, 0.01]   # positive per-period Sharpe
+    s2 = [-0.01, 0.0, -0.01, 0.0, -0.01, 0.0]   # negative per-period Sharpe
+    sig = trial_sharpe_std([s1, s2])
+    assert sig is not None and sig > 0          # dispersion across the two trial Sharpes
+    # fewer than 2 trials with >= min_obs observations -> None (caller falls back to sr_std)
+    assert trial_sharpe_std([s1, [0.01, 0.01]]) is None
+    assert trial_sharpe_std([]) is None
 
 
 def test_sharpe_zero_for_constant_returns():

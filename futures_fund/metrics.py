@@ -15,6 +15,18 @@ def sharpe(returns: list[float], periods_per_year: float = PERIODS_PER_YEAR) -> 
     return float(arr.mean() / sd * np.sqrt(periods_per_year))
 
 
+def trial_sharpe_std(return_streams: list[list[float]], min_obs: int = 5) -> float | None:
+    """Cross-trial Sharpe dispersion (sigma_SR) for the Deflated Sharpe Ratio: the std of each
+    trial's PER-PERIOD Sharpe. A 'trial' is a distinct strategy bet (e.g. each symbol the desk
+    selected to trade from the screened universe). Returns None when there are < 2 trials each
+    with >= min_obs observations — the caller then falls back to the single-strategy reduction
+    (sigma_SR = the Sharpe's own standard error) rather than guessing from sparse data."""
+    shrps = [sharpe(s, periods_per_year=1.0) for s in return_streams if len(s) >= min_obs]
+    if len(shrps) < 2:
+        return None
+    return float(np.std(shrps, ddof=1))
+
+
 def sortino(returns: list[float], periods_per_year: float = PERIODS_PER_YEAR) -> float:
     if len(returns) < 2:
         return 0.0

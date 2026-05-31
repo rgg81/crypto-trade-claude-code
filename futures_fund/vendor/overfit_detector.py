@@ -107,6 +107,7 @@ def deflated_sharpe_ratio(
     skewness: float = 0.0,
     kurtosis: float = 3.0,
     annualization: float = 1.0,
+    sigma_sr: float | None = None,
 ) -> DSRResult:
     """Compute the Deflated Sharpe Ratio.
 
@@ -122,6 +123,13 @@ def deflated_sharpe_ratio(
         kurtosis: Kurtosis of strategy returns (not excess; normal = 3.0).
         annualization: Annualization factor (e.g., sqrt(365) for daily crypto).
             The observed_sr is de-annualized internally.
+        sigma_sr: Standard deviation of the per-TRIAL Sharpe ratios (cross-trial
+            dispersion) in the SAME per-period units as the de-annualized SR. The
+            expected maximum SR under the null is sigma_sr * E[max of N std normals].
+            If None, falls back to the Sharpe's own standard error (sr_std) — the
+            canonical single-strategy reduction. (PATCHED: the original vendor omitted
+            this scaling, using the raw expected-max bracket and so making DSR>=0.95
+            unreachable on per-period data.)
 
     Returns:
         DSRResult with all computed values.
@@ -140,14 +148,19 @@ def deflated_sharpe_ratio(
         / (backtest_length - 1)
     )
 
-    # Expected maximum SR under null (all strategies have zero true SR)
+    # Cross-trial Sharpe dispersion: explicit (tracked trial Sharpes) or the single-strategy
+    # reduction sigma_sr = sr_std (so the expected-max bracket is on the observed Sharpe's scale).
+    var_sr = sigma_sr if sigma_sr is not None else sr_std
+
+    # Expected maximum SR under the null = sigma_sr * E[max of N standard normals].
     euler_mascheroni = 0.5772156649
     if num_trials == 1:
-        expected_max_sr = 0.0
+        bracket = 0.0
     else:
         z1 = norm.ppf(1.0 - 1.0 / num_trials)
         z2 = norm.ppf(1.0 - 1.0 / (num_trials * np.e))
-        expected_max_sr = z1 * (1.0 - euler_mascheroni) + euler_mascheroni * z2
+        bracket = z1 * (1.0 - euler_mascheroni) + euler_mascheroni * z2
+    expected_max_sr = var_sr * bracket
 
     # Deflated SR p-value
     if sr_std > 0:

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections import defaultdict
+
 from futures_fund.equity_log import equity_series, returns_series
 from futures_fund.graduation import deflated_sharpe_pvalue, graduation_verdict
 from futures_fund.journal import read_all_decisions
@@ -10,6 +12,7 @@ from futures_fund.metrics import (
     profit_factor,
     sharpe,
     sortino,
+    trial_sharpe_std,
 )
 
 
@@ -35,8 +38,16 @@ def build_scorecard(state_dir, memory_dir, monthly_target: float = 0.05,
     period_return = eq[-1] / eq[0] - 1.0
     mdd = max_drawdown(eq)
     shp = sharpe(rets)
+    # Cross-trial Sharpe dispersion (sigma_SR) from per-symbol return streams — each symbol the
+    # desk selected to trade is a "trial". None at cold-start (sparse) -> single-strategy reduction.
+    per_symbol: dict[str, list[float]] = defaultdict(list)
+    for d in closed:
+        notional = (d.get("size") or 0.0) * (d.get("entry") or 0.0)
+        if notional > 0:
+            per_symbol[d["symbol"]].append(d["realized_pnl"] / notional)
+    sigma_sr = trial_sharpe_std(list(per_symbol.values()))
     # conservative fixed trial count (not cycle count)
-    dsr = deflated_sharpe_pvalue(rets, num_trials=10)
+    dsr = deflated_sharpe_pvalue(rets, num_trials=10, sigma_sr=sigma_sr)
     beats_baseline = period_return > 0  # vs flat cash; a price baseline can refine this later
     grad = graduation_verdict(n_cycles, shp, dsr, beats_baseline, mdd,
                               min_cycles=min_cycles, horizon_cycles=horizon_cycles)
