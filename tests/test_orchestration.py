@@ -238,6 +238,58 @@ def test_holdings_review_rejects_trail_past_mark(tmp_path):
     assert report["trailed"] == 0 and load_positions(state_dir)[0].stop == 90.0
 
 
+def test_holdings_review_reduce_banks_half_and_keeps_runner(tmp_path):
+    from futures_fund.state import load_account
+    state_dir, memory_dir, ex = _seed_holding(tmp_path)  # ETH long entry 100 qty 1.0, mark ~147
+    default = _settings().account_size_usdt
+    report = gate_execute_step(
+        ex, _settings(), state_dir, memory_dir, now=dt.datetime(2026, 3, 1, tzinfo=UTC),
+        cycle_no=2, proposals=[],
+        management=[{"symbol": "ETHUSDT", "action": "reduce", "reduce_fraction": 0.5}])
+    assert report["reduced"] == 1 and report["banked_pnl"] > 0 and report["closed"] == 0
+    pos = load_positions(state_dir)
+    assert len(pos) == 1 and pos[0].symbol == "ETHUSDT" and pos[0].qty == 0.5  # runner kept
+    # only the reduce moved the wallet (no opens/closes) -> balance == default + banked
+    assert load_account(state_dir, default).balance == default + report["banked_pnl"]
+
+
+def test_holdings_review_reduce_works_for_short(tmp_path):
+    from futures_fund.state import Position, save_positions
+    state_dir, memory_dir = tmp_path / "s", tmp_path / "m"
+    held = Position(symbol="ETHUSDT", direction="short", qty=2.0, entry=200.0, stop=210.0,
+                    take_profits=[100.0], leverage=3.0, margin=133.0, liq_price=300.0,
+                    opened_cycle=1, opened_ts=dt.datetime(2026, 2, 1, tzinfo=UTC))
+    save_positions(state_dir, [held])
+    ex = _UnionExchange({"BTC/USDT:USDT": _uptrend(), "ETH/USDT:USDT": _uptrend()},
+                        {"ETHUSDT": "ETH/USDT:USDT"})  # ETH mark ~147 < entry 200 -> winning short
+    report = gate_execute_step(
+        ex, _settings(), state_dir, memory_dir, now=dt.datetime(2026, 3, 1, tzinfo=UTC),
+        cycle_no=2, proposals=[],
+        management=[{"symbol": "ETHUSDT", "action": "reduce", "reduce_fraction": 0.5}])
+    assert report["reduced"] == 1 and report["banked_pnl"] > 0
+    assert load_positions(state_dir)[0].qty == 1.0  # half of 2.0
+
+
+def test_holdings_review_reduce_drops_bad_fraction(tmp_path):
+    state_dir, memory_dir, ex = _seed_holding(tmp_path)
+    report = gate_execute_step(
+        ex, _settings(), state_dir, memory_dir, now=dt.datetime(2026, 3, 1, tzinfo=UTC),
+        cycle_no=2, proposals=[],
+        management=[{"symbol": "ETHUSDT", "action": "reduce", "reduce_fraction": 1.5}])
+    assert report["reduced"] == 0 and report["reduce_dropped"] == 1
+    assert load_positions(state_dir)[0].qty == 1.0  # untouched
+
+
+def test_holdings_review_reduce_promotes_dust_to_full_close(tmp_path):
+    state_dir, memory_dir, ex = _seed_holding(tmp_path)  # qty 1.0, mark ~147, min_notional 5.0
+    report = gate_execute_step(  # remaining 0.01 * 147 = ~1.47 < 5 -> full close
+        ex, _settings(), state_dir, memory_dir, now=dt.datetime(2026, 3, 1, tzinfo=UTC),
+        cycle_no=2, proposals=[],
+        management=[{"symbol": "ETHUSDT", "action": "reduce", "reduce_fraction": 0.99}])
+    assert report["closed"] == 1 and report["reduced"] == 0
+    assert load_positions(state_dir) == []
+
+
 def _btc_long(entry=147.0):  # a valid new-open proposal on BTC (uptrend last close ~147)
     return {"symbol": "BTCUSDT", "direction": "long", "entry": entry, "stop": entry - 4.0,
             "take_profits": [entry + 8.0], "atr": 2.0, "confidence": 0.7, "rationale": "x"}

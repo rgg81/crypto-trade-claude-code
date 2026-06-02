@@ -1,6 +1,33 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 from futures_fund.baseline import _atr, simple_regime
+
+_TF_SECONDS = {"15m": 900, "1h": 3600, "4h": 14400, "1d": 86400}
+
+
+def last_completed_frame(df, now: datetime | None, timeframe: str = "4h"):
+    """Drop the still-FORMING last candle so 'last close', momentum, and trigger evaluation read the
+    last COMPLETED bar — not a transient intra-candle print. The OHLCV feed returns the in-progress
+    candle (open-ts == the current window) as the last row; if `now` falls inside that window, that
+    row is dropped. An already-closed last candle (or no `now`) is left untouched, and a single-row
+    frame is never emptied. ctx.prices keeps the live last row for EXITS — only completed-bar
+    consumers call this."""
+    if df is None or not len(df) or now is None or len(df) < 2:
+        return df
+    try:
+        secs = _TF_SECONDS.get(timeframe, 14400)
+        ts = df["timestamp"].iloc[-1]
+        ts = ts.to_pydatetime() if hasattr(ts, "to_pydatetime") else ts
+        if ts.tzinfo is None:
+            from datetime import UTC
+            ts = ts.replace(tzinfo=UTC)
+        if (now - ts).total_seconds() < secs:   # last row's window has not closed yet -> forming
+            return df.iloc[:-1]
+    except Exception:  # noqa: BLE001 — never break the cycle over bar housekeeping
+        pass
+    return df
 
 
 def _derivatives(exchange, symbol: str, timeframe: str) -> dict:
@@ -24,10 +51,12 @@ def _derivatives(exchange, symbol: str, timeframe: str) -> dict:
     return out
 
 
-def build_symbol_brief(exchange, symbol: str, timeframe: str = "4h") -> dict:
+def build_symbol_brief(exchange, symbol: str, timeframe: str = "4h",
+                       now: datetime | None = None) -> dict:
     """Compact, JSON-serializable per-symbol data bundle the orchestrator injects into the
-    analyst subagents' prompts. Pure-ish: reads only from the injected exchange."""
-    df = exchange.ohlcv(symbol, timeframe)
+    analyst subagents' prompts. Pure-ish: reads only from the injected exchange. `now` (when given)
+    drops the still-forming last candle so last_close/momentum/regime read the last COMPLETED bar."""
+    df = last_completed_frame(exchange.ohlcv(symbol, timeframe), now, timeframe)
     funding = exchange.funding(symbol)
     close = df["close"]
     last = float(close.iloc[-1])

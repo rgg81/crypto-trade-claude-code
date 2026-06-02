@@ -1,12 +1,23 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime
 from pathlib import Path
 
 from pydantic import BaseModel, Field
 
 from futures_fund.models import Direction
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Write via a temp file + os.replace (atomic rename). A crash mid-write leaves the PRIOR file
+    intact rather than a half-written one — so account/positions can never be corrupted into a
+    permanent-RETRY wedge (the same pattern cycle_io/regime/pending_orders already use)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(text)
+    os.replace(tmp, path)
 
 
 class Position(BaseModel):
@@ -53,9 +64,7 @@ def load_account(state_dir, default_balance: float) -> AccountState:
 
 
 def save_account(state_dir, account: AccountState) -> None:
-    p = _account_path(state_dir)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(account.model_dump_json(indent=2))
+    _atomic_write_text(_account_path(state_dir), account.model_dump_json(indent=2))
 
 
 def load_positions(state_dir) -> list[Position]:
@@ -67,9 +76,8 @@ def load_positions(state_dir) -> list[Position]:
 
 
 def save_positions(state_dir, positions: list[Position]) -> None:
-    p = _positions_path(state_dir)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps([json.loads(pos.model_dump_json()) for pos in positions], indent=2))
+    _atomic_write_text(_positions_path(state_dir),
+                       json.dumps([json.loads(pos.model_dump_json()) for pos in positions], indent=2))
 
 
 def is_halted(state_dir) -> bool:

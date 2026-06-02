@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -10,11 +11,29 @@ def _path(state_dir) -> Path:
 
 
 def record_equity(state_dir, ts: datetime, equity: float, cycle: int) -> None:
-    """Append the desk's total equity at the end of a cycle (the return series' source)."""
+    """Append — or REPLACE the existing point for this `cycle` — the desk's total equity at cycle
+    end (the return series' source). Idempotent under a DUE RETRY re-running the same cycle: without
+    this, a RETRY appended a SECOND point for the cycle, injecting a spurious ~0% return that
+    corrupts the Sharpe/Sortino and the daily/weekly/monthly circuit breakers fed off this series.
+    Rewrite is atomic (tmp + os.replace) and tolerant of a pre-existing malformed line."""
     p = _path(state_dir)
     p.parent.mkdir(parents=True, exist_ok=True)
-    with p.open("a") as f:
-        f.write(json.dumps({"ts": ts.isoformat(), "equity": float(equity), "cycle": cycle}) + "\n")
+    recs = []
+    if p.exists():
+        for line in p.read_text().splitlines():
+            if not line.strip():
+                continue
+            try:
+                r = json.loads(line)
+            except (json.JSONDecodeError, ValueError):
+                continue  # skip a corrupt line rather than wedge the whole series
+            if isinstance(r, dict) and r.get("cycle") == cycle:
+                continue  # drop the prior point for this cycle -> RETRY replaces, never duplicates
+            recs.append(r)
+    recs.append({"ts": ts.isoformat(), "equity": float(equity), "cycle": cycle})
+    tmp = p.with_suffix(".jsonl.tmp")
+    tmp.write_text("".join(json.dumps(r, default=str) + "\n" for r in recs))
+    os.replace(tmp, p)
 
 
 def equity_series(state_dir) -> list[tuple[str, float]]:

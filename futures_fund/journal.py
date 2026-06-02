@@ -60,8 +60,19 @@ def journal_file(memory_dir, ts: datetime) -> Path:
 
 
 def append_decision(memory_dir, fields: dict) -> str:
-    """Validate and append a Phase-1 decision; returns its id (generated if absent)."""
+    """Validate and append a Phase-1 decision; returns its id (generated if absent).
+
+    IDEMPOTENT per (cycle, symbol, direction): a DUE RETRY re-running the same cycle re-journals the
+    same opens — without this guard that double-counts the open in hit-rate / per-agent stats /
+    reflection. If a decision for this (cycle, symbol, direction) already exists, its id is returned
+    and nothing is appended. The key is unique per cycle (no stacking: one open per symbol+direction
+    per cycle, and cycle numbers are monotonic), so this never collides two legitimate decisions."""
     data = dict(fields)
+    cyc, sym, dirn = data.get("cycle"), data.get("symbol"), data.get("direction")
+    if cyc is not None and sym is not None:
+        for d in read_all_decisions(memory_dir):
+            if d.get("cycle") == cyc and d.get("symbol") == sym and d.get("direction") == dirn:
+                return d.get("id")  # already journaled this cycle's open -> reuse, don't duplicate
     data.setdefault("id", uuid.uuid4().hex)
     decision = Decision.model_validate(data)
     f = journal_file(memory_dir, decision.ts)

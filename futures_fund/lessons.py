@@ -8,6 +8,11 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 LessonState = Literal["candidate", "validated", "retired"]
+# A lesson's directional pull on the desk. 'restrictive' = a brake (do NOT / cut / avoid);
+# 'enabling' = an accelerator (DO take / size the trade when X); 'process' = neutral discipline
+# (journal a falsifiable prediction, etc.). Used by the retrieval quota so a losing record can't
+# flood every debate with prohibitions and talk the desk out of its own edge.
+Polarity = Literal["restrictive", "enabling", "process"]
 
 
 class Lesson(BaseModel):
@@ -18,6 +23,7 @@ class Lesson(BaseModel):
     symbol: str | None = None
     tags: list[str] = Field(default_factory=list)
     importance: int = 5               # 1-10
+    polarity: Polarity = "restrictive"  # legacy lessons (no field) default to the dominant type
     state: LessonState = "candidate"
     confirmations: int = 0
     provenance: list[str] = Field(default_factory=list)  # journal decision ids
@@ -58,9 +64,13 @@ def score_lesson(lesson: Lesson, now: datetime, query_tags: list[str],
 
 
 def retrieve_lessons(memory_dir, now: datetime, regime: str | None,
-                     query_tags: list[str], k: int = 5) -> list[Lesson]:
-    """Regime-filter FIRST (a lesson with regime=None applies everywhere), then rank by score,
-    return the top-k. Retired lessons are excluded.
+                     query_tags: list[str], k: int = 5,
+                     max_restrictive: int = 3) -> list[Lesson]:
+    """Regime-filter FIRST (a lesson with regime=None applies everywhere), rank by score, then
+    apply a POLARITY QUOTA so the injected set is two-sided: VALIDATED lessons (standing rules)
+    are always kept; >=1 enabling lesson is force-included when any exists; and restrictive
+    *fills* are capped at `max_restrictive` so a losing record's prohibitions can't monopolize
+    every debate. Retired lessons excluded.
 
     NOTE: passing regime=None as the QUERY matches only universal (lz.regime is None) lessons,
     NOT all lessons; pass a regime string to also include lessons tagged to that regime."""
@@ -69,7 +79,32 @@ def retrieve_lessons(memory_dir, now: datetime, regime: str | None,
         if lz.state != "retired" and (lz.regime is None or lz.regime == regime)
     ]
     candidates.sort(key=lambda lz: score_lesson(lz, now, query_tags), reverse=True)
-    return candidates[:k]
+
+    validated = [lz for lz in candidates if lz.state == "validated"]
+    pool = [lz for lz in candidates if lz.state != "validated"]
+    out: list[Lesson] = list(validated)  # standing rules are never dropped by the quota
+
+    # Force-include the highest-scored enabling lesson if none is in the set yet.
+    if len(out) < k and not any(lz.polarity == "enabling" for lz in out):
+        enabling = next((lz for lz in pool if lz.polarity == "enabling"), None)
+        if enabling is not None:
+            out.append(enabling)
+
+    # Fill the remaining slots by score, capping restrictive FILLS (validated already counted).
+    n_restrict = 0
+    for lz in pool:
+        if lz in out:
+            continue
+        if len(out) >= k:
+            break
+        if lz.polarity == "restrictive" and n_restrict >= max_restrictive:
+            continue  # don't flood the debate with prohibitions
+        out.append(lz)
+        if lz.polarity == "restrictive":
+            n_restrict += 1
+
+    out.sort(key=lambda lz: score_lesson(lz, now, query_tags), reverse=True)
+    return out[:max(k, len(validated))]  # never truncate away a validated standing rule
 
 
 def _write_all(memory_dir, lessons: list[Lesson]) -> None:

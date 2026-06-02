@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 from collections import defaultdict
+from pathlib import Path
 
 from futures_fund.equity_log import equity_series, returns_series
 from futures_fund.graduation import deflated_sharpe_pvalue, graduation_verdict
@@ -14,6 +16,64 @@ from futures_fund.metrics import (
     sortino,
     trial_sharpe_std,
 )
+
+
+def _numeric_cycle_dirs(state_dir) -> list[int]:
+    cyc = Path(state_dir) / "cycle"
+    if not cyc.exists():
+        return []
+    return sorted((int(p.name) for p in cyc.glob("*") if p.is_dir() and p.name.isdigit()),
+                  reverse=True)
+
+
+def _recent_open_count(state_dir, k: int) -> int:
+    """Total NEW positions opened across the last k cycles that produced a report.json."""
+    total = seen = 0
+    for n in _numeric_cycle_dirs(state_dir):
+        rp = Path(state_dir) / "cycle" / str(n) / "report.json"
+        if not rp.exists():
+            continue
+        try:
+            total += int(json.loads(rp.read_text()).get("opened", 0) or 0)
+        except (json.JSONDecodeError, OSError, ValueError, TypeError):
+            pass
+        seen += 1
+        if seen >= k:
+            break
+    return total
+
+
+def _latest_screen_has_candidates(state_dir) -> bool:
+    """True if the most recent cycle that ran a screen surfaced >= 1 candidate (edge on the board)."""
+    for n in _numeric_cycle_dirs(state_dir):
+        sp = Path(state_dir) / "cycle" / str(n) / "screened.json"
+        if not sp.exists():
+            continue
+        try:
+            return len(json.loads(sp.read_text()).get("symbols", [])) > 0
+        except (json.JSONDecodeError, OSError):
+            return False
+    return False
+
+
+def _has_open_positions(state_dir) -> bool:
+    p = Path(state_dir) / "positions.json"
+    if not p.exists():
+        return False
+    try:
+        return len(json.loads(p.read_text())) > 0
+    except (json.JSONDecodeError, OSError, TypeError):
+        return False
+
+
+def _is_halted_raw(state_dir) -> bool:
+    p = Path(state_dir) / "account.json"
+    if not p.exists():
+        return False
+    try:
+        return bool(json.loads(p.read_text()).get("halt", False))
+    except (json.JSONDecodeError, OSError):
+        return False
 
 
 def build_scorecard(state_dir, memory_dir, monthly_target: float = 0.05,
@@ -54,13 +114,43 @@ def build_scorecard(state_dir, memory_dir, monthly_target: float = 0.05,
     attr = agent_attribution(closed)
     hr = hit_rate(closed)
 
+    # The warnings are deliberately TWO-SIDED. Three are brakes (risk-reducing); one is an
+    # accelerator (counter-signal against under-deployment). Without the accelerator the injected
+    # context is a one-way ratchet that talks the desk out of every clean trade — the root cause of
+    # the desk standing down to cash for cycles on end. See tests/test_scorecard.py.
     warnings: list[str] = []
+    # --- BRAKE: real drawdown still hard-brakes (unchanged) ---
     if mdd >= 0.05:
         warnings.append(f"in drawdown: {mdd:.0%} from peak — bias risk-off")
+    # --- BRAKE: unproven edge sizes down (unchanged) ---
     if n_cycles >= 11 and dsr < 0.95:  # DSR only computable at >=10 returns
         warnings.append("edge not statistically proven (DSR < 0.95) — size conservatively")
-    if n_cycles >= 6 and period_return < monthly_target * (n_cycles / 180.0):
-        warnings.append(f"running below the {monthly_target:.0%}/mo target — do not force trades")
+    # --- QUALITY (reworded, two-sided): gate on a TRAILING-window pace, not the old cumulative-
+    # from-inception bar that latched permanently once underwater (and NOT on the small-sample
+    # hit-rate). Demands quality WITHOUT mandating passivity. ---
+    window = min(len(rets), 30)
+    trailing = sum(rets[-window:]) if window else 0.0
+    if n_cycles >= 6 and trailing < monthly_target * (window / 180.0):
+        warnings.append(
+            f"below the {monthly_target:.0%}/mo pace — require a clean, proven-edge setup before "
+            "sizing up and do NOT chase or force low-quality trades; but a qualifying setup that "
+            "clears RR>=2 and the heat cap is NOT forcing — do not stand flat on it")
+    # --- ACCELERATOR (counter-signal): opportunity cost of idle cash. Fires ONLY in a tradeable
+    # state — healthy, not halted, FLAT, zero opens over the last 2 cycles, AND the screen still
+    # surfacing candidates — and self-silences the moment the desk is deployed, in drawdown,
+    # halted, or the board is genuinely empty, so it can never manufacture trades in a thin tape. ---
+    eq_peak = max(eq)
+    cur_dd = (eq_peak - eq[-1]) / eq_peak if eq_peak > 0 else 0.0
+    if (n_cycles >= 6 and cur_dd < 0.05 and not _is_halted_raw(state_dir)
+            and not _has_open_positions(state_dir)
+            and _recent_open_count(state_dir, k=2) == 0
+            and _latest_screen_has_candidates(state_dir)):
+        warnings.append(
+            "under-deployed: FLAT with zero new opens across the last 2 cycles while the screen "
+            f"keeps surfacing candidates — idle cash has opportunity cost vs the {monthly_target:.0%}"
+            "/mo target. Standing flat is itself a position with negative carry; do NOT stand flat "
+            "on a clean, edge-aligned setup that clears the gate (RR>=2 + heat). Taking such a "
+            "setup is NOT forcing.")
 
     return {
         "equity": eq[-1], "monthly_target": monthly_target, "n_cycles": n_cycles,

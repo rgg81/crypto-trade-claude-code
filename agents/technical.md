@@ -23,9 +23,9 @@ You serve Operation TEMPEST (the charter is injected above). You read price acti
 ```
 - `agent` MUST be `"technical"`. `confidence` in [0, 1]. Emit one such object per shortlisted symbol (a JSON list when covering several).
 
-## Example
+## Example (a bearish read — the mirror of a bullish one; stance is a READ, both sides co-equal)
 ```json
-{"agent": "technical", "symbol": "BTCUSDT", "stance": "bullish", "confidence": 0.74,
- "key_points": ["price above rising 20/50 EMA", "higher highs on 4h", "ATR expanding with trend"],
- "signals": {"ema_slope": 0.012, "rsi": 61.5, "atr": 850.0, "adx": 28.0}}
+{"agent": "technical", "symbol": "SOLUSDT", "stance": "bearish", "confidence": 0.7,
+ "key_points": ["lower high on 4h, price below falling 20/50 EMA", "broke the prior swing-low shelf on volume", "ATR expanding AGAINST the prior up-trend = regime shift down"],
+ "signals": {"ema_slope": -0.011, "rsi": 38.0, "atr": 2.4, "adx": 27.0}}
 ```
