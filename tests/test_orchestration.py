@@ -290,6 +290,63 @@ def test_holdings_review_reduce_promotes_dust_to_full_close(tmp_path):
     assert load_positions(state_dir) == []
 
 
+# ---- reduce v2: an OPTIONAL new_stop on a reduce banks AND trails the runner in one directive ----
+
+def test_reduce_with_new_stop_banks_and_trails_runner(tmp_path):
+    state_dir, memory_dir, ex = _seed_holding(tmp_path)  # ETH long entry 100, qty 1.0, stop 90, mark ~147
+    report = gate_execute_step(
+        ex, _settings(), state_dir, memory_dir, now=dt.datetime(2026, 3, 1, tzinfo=UTC),
+        cycle_no=2, proposals=[],
+        management=[{"symbol": "ETHUSDT", "action": "reduce", "reduce_fraction": 0.5,
+                     "new_stop": 110.0}])  # 90 < 110 < mark 147 -> valid profit-lock trail
+    assert report["reduced"] == 1 and report["trailed"] == 1  # banked AND trailed in one directive
+    pos = load_positions(state_dir)
+    assert len(pos) == 1 and pos[0].qty == 0.5 and pos[0].stop == 110.0  # runner trimmed + trailed
+
+
+def test_reduce_rejects_loosening_new_stop_but_still_banks(tmp_path):
+    state_dir, memory_dir, ex = _seed_holding(tmp_path)  # long, stop 90, mark ~147
+    report = gate_execute_step(  # new_stop 80 is BELOW current 90 (looser for a long) -> rejected
+        ex, _settings(), state_dir, memory_dir, now=dt.datetime(2026, 3, 1, tzinfo=UTC),
+        cycle_no=2, proposals=[],
+        management=[{"symbol": "ETHUSDT", "action": "reduce", "reduce_fraction": 0.5,
+                     "new_stop": 80.0}])
+    assert report["reduced"] == 1 and report["trailed"] == 0  # banked, trail rejected (not loosened)
+    pos = load_positions(state_dir)
+    assert pos[0].qty == 0.5 and pos[0].stop == 90.0  # runner keeps the original stop
+
+
+def test_reduce_with_new_stop_trails_short_runner(tmp_path):
+    from futures_fund.state import Position, save_positions
+    state_dir, memory_dir = tmp_path / "s", tmp_path / "m"
+    held = Position(symbol="ETHUSDT", direction="short", qty=2.0, entry=200.0, stop=210.0,
+                    take_profits=[100.0], leverage=3.0, margin=133.0, liq_price=300.0,
+                    opened_cycle=1, opened_ts=dt.datetime(2026, 2, 1, tzinfo=UTC))
+    save_positions(state_dir, [held])
+    ex = _UnionExchange({"BTC/USDT:USDT": _uptrend(), "ETH/USDT:USDT": _uptrend()},
+                        {"ETHUSDT": "ETH/USDT:USDT"})  # ETH mark ~147 < entry 200 -> winning short
+    report = gate_execute_step(  # short: mark(147) < new_stop(160) < cur_stop(210) -> valid
+        ex, _settings(), state_dir, memory_dir, now=dt.datetime(2026, 3, 1, tzinfo=UTC),
+        cycle_no=2, proposals=[],
+        management=[{"symbol": "ETHUSDT", "action": "reduce", "reduce_fraction": 0.5,
+                     "new_stop": 160.0}])
+    assert report["reduced"] == 1 and report["trailed"] == 1
+    pos = load_positions(state_dir)
+    assert pos[0].qty == 1.0 and pos[0].stop == 160.0  # short runner trimmed + trailed (160 < 210)
+
+
+def test_reduce_noop_dust_still_trails_with_new_stop(tmp_path):
+    state_dir, memory_dir, ex = _seed_holding(tmp_path)  # long qty 1.0, stop 90, mark ~147
+    report = gate_execute_step(  # fraction 0.0005 -> slice floors to 0 (dust); new_stop still trails
+        ex, _settings(), state_dir, memory_dir, now=dt.datetime(2026, 3, 1, tzinfo=UTC),
+        cycle_no=2, proposals=[],
+        management=[{"symbol": "ETHUSDT", "action": "reduce", "reduce_fraction": 0.0005,
+                     "new_stop": 110.0}])
+    assert report["reduced"] == 0 and report["trailed"] == 1  # no bank (dust) but the trail applied
+    pos = load_positions(state_dir)
+    assert pos[0].qty == 1.0 and pos[0].stop == 110.0  # whole position kept, stop trailed
+
+
 def _btc_long(entry=147.0):  # a valid new-open proposal on BTC (uptrend last close ~147)
     return {"symbol": "BTCUSDT", "direction": "long", "entry": entry, "stop": entry - 4.0,
             "take_profits": [entry + 8.0], "atr": 2.0, "confidence": 0.7, "rationale": "x"}

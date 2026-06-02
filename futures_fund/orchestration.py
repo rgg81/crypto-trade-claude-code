@@ -352,6 +352,16 @@ def _valid_reduce_fraction(v) -> float | None:
     return f if 0.0 < f < 1.0 else None
 
 
+def _is_tighter_stop(direction: str, cur_stop: float, new_stop: float, mark: float | None) -> bool:
+    """A trailed stop is valid only if it is TIGHTER than the current stop and short of the mark —
+    a winning long locks profit ABOVE entry, a winning short BELOW; a stop past the mark would
+    insta-stop. Shared by the HOLD trail and the reduce-v2 bank-and-trail."""
+    if mark is None:
+        return False
+    return ((direction == "long" and cur_stop < new_stop < mark) or
+            (direction == "short" and mark < new_stop < cur_stop))
+
+
 def gate_execute_step(exchange, settings: Settings, state_dir, memory_dir,
                       now: datetime, cycle_no: int, proposals: list[dict],
                       management: list[dict] | None = None,
@@ -419,35 +429,39 @@ def gate_execute_step(exchange, settings: Settings, state_dir, memory_dir,
             n_events = count_funding_events(p.opened_ts, now, int(fr.interval_hours))
             res = reduce_position(p, mark, frac, funding_rate=fr.current_rate,
                                   funding_events=n_events, slippage_bps=_SLIPPAGE_BPS, spec=spec)
-            if res.kind == "noop_dust":
-                reduce_warnings.append(f"reduce noop (dust) {p.symbol}")
-                new_positions.append(p)
-                continue
             if res.kind == "promote_full":
                 # The runner would be sub-min-notional dust -> close 100% via the normal force_close
                 # path. This emits a "reduce" intent action here AND execute_proposals emits the
                 # actual "close" action (two entries for one symbol — intentional). The wallet is
-                # credited exactly once, by execute_proposals' close, NOT here.
+                # credited exactly once, by execute_proposals' close, NOT here. (No survivor to
+                # trail.)
                 force_close.add(p.symbol)
                 new_positions.append(p)
                 reduce_actions.append({"reduce": p.symbol, "fraction": frac, "full": True})
                 continue
-            account.balance += res.closed_trade.realized_pnl  # bank the slice
-            reduced += 1
-            banked_pnl += res.closed_trade.realized_pnl
-            reduce_actions.append({"reduce": p.symbol, "fraction": frac,
-                                   "pnl": res.closed_trade.realized_pnl, "full": False})
-            new_positions.append(res.runner)  # carry the reduced runner
+            if res.kind == "noop_dust":
+                reduce_warnings.append(f"reduce noop (dust) {p.symbol}")
+                survivor = p  # nothing banked; the un-reduced position survives
+            else:  # "reduced": bank the slice, carry the runner
+                account.balance += res.closed_trade.realized_pnl
+                reduced += 1
+                banked_pnl += res.closed_trade.realized_pnl
+                reduce_actions.append({"reduce": p.symbol, "fraction": frac,
+                                       "pnl": res.closed_trade.realized_pnl, "full": False})
+                survivor = res.runner
+            # reduce v2: an OPTIONAL new_stop trails the SURVIVOR's stop in the SAME directive
+            # (bank-and-trail), reusing the tighten-only/short-of-mark guard.
+            ns = m.get("new_stop")
+            if ns is not None and _is_tighter_stop(survivor.direction, survivor.stop,
+                                                   float(ns), mark):
+                survivor = survivor.model_copy(update={"stop": float(ns)})
+                trailed += 1
+            new_positions.append(survivor)
             continue
         if m and m.get("action") == "hold" and m.get("new_stop") is not None:
             ns = float(m["new_stop"])
             mark = ctx.prices.get(p.symbol)
-            # Trail only TIGHTER and short of the current mark — so a winning long can lock profit
-            # ABOVE entry and a winning short BELOW entry (a stop past mark would insta-stop).
-            tighter = mark is not None and (
-                (p.direction == "long" and p.stop < ns < mark) or
-                (p.direction == "short" and mark < ns < p.stop))
-            if tighter:
+            if _is_tighter_stop(p.direction, p.stop, ns, mark):
                 p = p.model_copy(update={"stop": ns})  # trail only; never loosen
                 trailed += 1
         new_positions.append(p)

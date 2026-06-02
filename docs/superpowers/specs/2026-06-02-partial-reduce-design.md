@@ -211,11 +211,11 @@ Full `uv run pytest` must pass.
 
 ## Out of scope (deliberate v1 simplifications)
 
-- **Bank + trail the runner in one directive.** v1 `reduce` is a pure qty cut; to also move the
-  runner's stop, the team uses the existing `hold + new_stop` action in a subsequent review. A
-  same-cycle `new_stop` on a `reduce` is a trivial v2 add (the tighten-only trail guard already
-  exists at orchestration.py:392–402) — left out only to keep v1 minimal, not for any technical
-  obstacle.
+- **Bank + trail the runner in one directive.** ✅ **SHIPPED in v2** (2026-06-02, after cycle 22 hit
+  the limitation live): `reduce` now accepts an optional `new_stop` that trails the survivor's stop
+  in the same directive, reusing the shared `_is_tighter_stop` guard (also used by the HOLD trail).
+  *Original v1 note:* v1 `reduce` was a pure qty cut; to also move the runner's stop, the team used
+  the existing `hold + new_stop` action in a subsequent review.
 - **Automatic take-profit ladder** (auto-bank a fraction when TP1 hits). Would change the protected
   `exits`/`detect_exit` full-close path and risk double-banking with the existing full-TP trigger;
   out of scope.
