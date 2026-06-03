@@ -217,7 +217,12 @@ def reclassify_step(state_dir, context: dict, analyst_reports, now: datetime | N
     try:
         from datetime import UTC
         from futures_fund.regime import classify_regime
-        from futures_fund.regime_news import aggregate_news_risk_off
+        from futures_fund.regime_news import (
+            aggregate_news_risk_off,
+            apply_news_stickiness,
+            load_last_shock_cycle,
+            save_last_shock_cycle,
+        )
         market_context = (context or {}).get("market_context") or {}
         briefs = (context or {}).get("briefs") or []
         # cycle_no feeds the int-typed RegimeState; an absent/null context['cycle'] must not make
@@ -229,6 +234,14 @@ def reclassify_step(state_dir, context: dict, analyst_reports, now: datetime | N
         cycle_no = int(cycle_no)
         warnings = market_context.get("warnings") if isinstance(market_context, dict) else []
         news_off = aggregate_news_risk_off(analyst_reports, briefs, warnings)
+        # Sticky/decaying news shock: an unresolved market-wide shock must NOT silently lapse when
+        # its headline scrolls out of the rolling feed (a degraded None read). Keep it elevated
+        # through degraded reads within the decay window; an explicit False (analyst judged no
+        # shock) resolves it. Writes are idempotent per cycle (a RETRY reproduces the same state).
+        last_shock = load_last_shock_cycle(state_dir)
+        news_off, new_last_shock = apply_news_stickiness(news_off, cycle_no, last_shock)
+        if new_last_shock != last_shock:
+            save_last_shock_cycle(state_dir, new_last_shock)
         # Re-use the preflight served candle so this cycle's risk_off vote lands on the SAME 4h
         # candle the deterministic chain expects; fall back to a fresh clock only if it is absent.
         when = None

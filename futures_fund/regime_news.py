@@ -27,8 +27,11 @@ also holds: news_term in [-1, 0] only deepens risk-off, never lifts toward risk-
 """
 from __future__ import annotations
 
+import json
+from pathlib import Path
 
 _TRUTHY_STR = {"1", "true", "yes", "y", "t"}
+_DECAY_K = 4  # cycles a detected shock stays sticky through DEGRADED (None) reads before decaying
 
 
 def _flag_set(report: dict) -> bool:
@@ -67,3 +70,42 @@ def aggregate_news_risk_off(analyst_reports, briefs=None, warnings=None) -> bool
         return any(_flag_set(r) for r in news)
     except Exception:  # noqa: BLE001 — classification must never break the cycle
         return None
+
+
+def apply_news_stickiness(raw, cycle_no, last_shock_cycle, decay_k: int = _DECAY_K):
+    """Make an unresolved market-wide news shock STICKY so it cannot silently lapse when its
+    headline scrolls out of the rolling feed (a degraded/None read). The News analyst raises the
+    flag only on a real shock; once raised it should persist until an explicit RESOLUTION or decay,
+    NOT vanish because a headline aged out of a fixed window.
+      raw True  (shock flagged)    -> (True, cycle_no)   arm/re-arm the sticky window
+      raw False (judged no shock)  -> (False, None)      resolution respected, sticky cleared
+      raw None  (cannot assess)    -> True if within decay_k cycles of the last shock, else None
+    Returns (effective_news_off, new_last_shock_cycle). Pure/deterministic so a RETRY reproduces."""
+    if raw is True:
+        return True, cycle_no
+    if raw is False:
+        return False, None
+    if last_shock_cycle is not None and 0 <= cycle_no - last_shock_cycle <= decay_k:
+        return True, last_shock_cycle  # degraded read, but the shock has not resolved/decayed yet
+    return None, last_shock_cycle
+
+
+def _shock_path(state_dir) -> Path:
+    return Path(state_dir) / "news_shock.json"
+
+
+def load_last_shock_cycle(state_dir) -> int | None:
+    """The last cycle a market-wide news shock was flagged (for sticky/decaying persistence)."""
+    try:
+        return json.loads(_shock_path(state_dir).read_text()).get("last_shock_cycle")
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
+def save_last_shock_cycle(state_dir, last_shock_cycle) -> None:
+    """Atomically persist the last-shock cycle (tmp + replace), so a crash never corrupts it."""
+    p = _shock_path(state_dir)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps({"last_shock_cycle": last_shock_cycle}))
+    tmp.replace(p)

@@ -397,3 +397,63 @@ def test_reclassify_skipped_false_on_halt_no_news_reports():
 def test_reclassify_skipped_false_on_bad_inputs():
     assert reclassify_skipped(None, [_news("BTCUSDT", 1)]) is False
     assert reclassify_skipped({"drivers": {"news_risk_off": None}}, "not-a-list") is False
+
+
+# ---- Sticky/decaying news shock: an unresolved shock must not lapse when its headline ages off ----
+
+from futures_fund.regime_news import (  # noqa: E402
+    apply_news_stickiness,
+    load_last_shock_cycle,
+    save_last_shock_cycle,
+)
+
+
+def test_news_stickiness_true_arms_and_reraises():
+    assert apply_news_stickiness(True, 10, None) == (True, 10)
+    assert apply_news_stickiness(True, 12, 8) == (True, 12)  # a fresh flag re-arms the sticky window
+
+
+def test_news_stickiness_none_within_window_stays_true():
+    # degraded read (headline scrolled off the rolling feed) within the decay window -> sticky True
+    assert apply_news_stickiness(None, 12, 10, decay_k=4) == (True, 10)
+    assert apply_news_stickiness(None, 14, 10, decay_k=4) == (True, 10)  # exactly at the edge (4)
+
+
+def test_news_stickiness_none_past_window_decays():
+    assert apply_news_stickiness(None, 15, 10, decay_k=4) == (None, 10)  # 5 > 4 -> decayed to None
+
+
+def test_news_stickiness_none_no_prior_shock():
+    assert apply_news_stickiness(None, 10, None) == (None, None)
+
+
+def test_news_stickiness_false_clears_shock():
+    # an explicit no-shock read (analyst judged resolution) clears the sticky state -> respected
+    assert apply_news_stickiness(False, 12, 10) == (False, None)
+
+
+def test_news_shock_persistence_roundtrip(tmp_path):
+    assert load_last_shock_cycle(tmp_path) is None       # absent -> None
+    save_last_shock_cycle(tmp_path, 7)
+    assert load_last_shock_cycle(tmp_path) == 7
+    save_last_shock_cycle(tmp_path, None)
+    assert load_last_shock_cycle(tmp_path) is None
+
+
+def test_reclassify_sticky_keeps_shock_through_degraded_read(tmp_path):
+    # cyc10 flags a shock (True) -> persists; cyc11 the headline has aged off (no news reports ->
+    # raw None) but the sticky state keeps news_risk_off True through the degraded read.
+    reclassify_step(tmp_path, _ctx(_uptrend_briefs(), cycle_no=10), [_news("BTCUSDT", 1)])
+    rs = reclassify_step(tmp_path, _ctx(_uptrend_briefs(), cycle_no=11), [])  # raw None (no news)
+    assert rs["drivers"]["news_risk_off"] is True
+
+
+def test_reclassify_false_resolves_and_clears_sticky(tmp_path):
+    reclassify_step(tmp_path, _ctx(_uptrend_briefs(), cycle_no=10), [_news("BTCUSDT", 1)])   # shock
+    # cyc11 the analyst explicitly judges no shock (all flags 0) -> raw False -> resolves + clears
+    rs = reclassify_step(tmp_path, _ctx(_uptrend_briefs(), cycle_no=11),
+                         [_news("BTCUSDT", 0), _news("ETHUSDT", 0)])
+    assert rs["drivers"]["news_risk_off"] is False
+    # cyc12 degraded -> sticky was cleared by the resolution -> stays None (does NOT resurrect)
+    rs2 = reclassify_step(tmp_path, _ctx(_uptrend_briefs(), cycle_no=12), [])
+    assert rs2["drivers"]["news_risk_off"] is None
