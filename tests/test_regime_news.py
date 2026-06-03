@@ -354,3 +354,46 @@ def test_classify_safe_explicit_true_applies(tmp_path):
     rs = _classify_regime_safe(tmp_path, {"fear_greed": {"value": 55}, "news_risk_off": True},
                                _uptrend_briefs(), NOW, 1)
     assert round(base["score"] - rs["score"], 4) == 0.10
+
+
+# ---- Phase 4.6 fail-loud guard: a SKIPPED reclassify must not pass the gate silently ----
+
+from futures_fund.orchestration import reclassify_skipped  # noqa: E402
+
+
+def test_reclassify_step_stamps_reclassified_marker(tmp_path):
+    # reclassify_step marks that Phase 4.6 RAN, so the guard isn't fooled by a degraded-feed None
+    ctx = _ctx(_uptrend_briefs())
+    rs2 = reclassify_step(tmp_path, ctx, [_news("BTCUSDT", 1)])
+    assert rs2["drivers"].get("reclassified") is True
+    rs3 = reclassify_step(tmp_path, ctx, "not-a-list")   # degraded fold (None) but it RAN
+    assert rs3["drivers"].get("reclassified") is True
+
+
+def test_reclassify_skipped_true_when_news_ran_but_not_folded():
+    # preflight-only regime_state (no marker, news_risk_off None) + news analysts ran -> SKIPPED
+    rs = {"regime": "risk_off", "drivers": {"news_risk_off": None}}
+    assert reclassify_skipped(rs, [_news("BTCUSDT", 1)]) is True
+
+
+def test_reclassify_skipped_false_when_marker_present():
+    # reclassify ran (marker) even if it folded to None (degraded feed) -> NOT skipped
+    rs = {"regime": "risk_off", "drivers": {"news_risk_off": None, "reclassified": True}}
+    assert reclassify_skipped(rs, [_news("BTCUSDT", 1)]) is False
+
+
+def test_reclassify_skipped_false_when_news_folded(tmp_path):
+    # news_risk_off in {True, False} -> reclassify ran (backward-compat for pre-marker contexts)
+    rs = {"regime": "risk_off", "drivers": {"news_risk_off": True}}
+    assert reclassify_skipped(rs, [_news("BTCUSDT", 1)]) is False
+
+
+def test_reclassify_skipped_false_on_halt_no_news_reports():
+    # HALT / stand-down: no analyst pass -> no news reports -> never block
+    rs = {"regime": "risk_off", "drivers": {"news_risk_off": None}}
+    assert reclassify_skipped(rs, []) is False
+
+
+def test_reclassify_skipped_false_on_bad_inputs():
+    assert reclassify_skipped(None, [_news("BTCUSDT", 1)]) is False
+    assert reclassify_skipped({"drivers": {"news_risk_off": None}}, "not-a-list") is False

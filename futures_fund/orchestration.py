@@ -242,9 +242,32 @@ def reclassify_step(state_dir, context: dict, analyst_reports, now: datetime | N
             when = now or datetime.now(UTC)
         rs = classify_regime(state_dir, market_context, briefs, when,
                              cycle_no=cycle_no, news_risk_off=news_off)
-        return rs.model_dump(mode="json")
+        rs_dict = rs.model_dump(mode="json")
+        # Mark that Phase 4.6 (the news-fold) RAN, so the fail-loud guard can distinguish a
+        # legitimate degraded-feed None from a SKIPPED reclassify (where this marker is absent).
+        rs_dict.setdefault("drivers", {})["reclassified"] = True
+        return rs_dict
     except Exception:  # noqa: BLE001 — never break the cycle; keep the pass-1 regime
         return prior
+
+
+def reclassify_skipped(regime_state, analyst_reports) -> bool:
+    """Fail-loud guard for a SKIPPED reclassify (Phase 4.6). True when the analysts produced a news
+    judgement (>=1 news-agent report) but the news-fold was never applied — regime_state carries no
+    `reclassified` marker AND news_risk_off is still None. Distinguishes a genuinely skipped
+    reclassify from (a) a legitimate degraded-feed fold (marker present), (b) a clean fold
+    (news_risk_off in {True, False}), and (c) a HALT/stand-down with no analyst pass (no news
+    reports -> never blocks). Used by gate_execute_cli to BLOCK the gate so a skipped news-fold
+    cannot pass silently with a stale (news-blind) regime."""
+    if not isinstance(regime_state, dict):
+        return False
+    drivers = regime_state.get("drivers") or {}
+    if drivers.get("reclassified") is True:
+        return False  # Phase 4.6 explicitly ran (even if it folded to a degraded None)
+    if drivers.get("news_risk_off") is not None:
+        return False  # news judged True/False -> folded (backward-compat for pre-marker contexts)
+    reports = analyst_reports if isinstance(analyst_reports, list) else []
+    return any(isinstance(r, dict) and r.get("agent") == "news" for r in reports)
 
 
 def screen_step(reports, top_n: int = 5) -> list[str]:

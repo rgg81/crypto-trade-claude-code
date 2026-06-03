@@ -12,7 +12,11 @@ from datetime import UTC, datetime
 from futures_fund.config import load_settings
 from futures_fund.cycle_io import load_output, save_output
 from futures_fund.exchange import FuturesExchange
-from futures_fund.orchestration import gate_execute_step, management_review
+from futures_fund.orchestration import (
+    gate_execute_step,
+    management_review,
+    reclassify_skipped,
+)
 from futures_fund.scheduling import floor4
 
 
@@ -51,6 +55,21 @@ def main() -> None:
         print("WARNING: context.json missing — regime UNREAD; fail-closed (both directions must "
               "confirm via trigger, no naked market entry).", file=sys.stderr)
         regime_state = _DEGRADED
+    # FAIL-LOUD: a SKIPPED reclassify (Phase 4.6) must not run the gate with a news-blind regime.
+    # If the analysts produced a news judgement but the news-fold was never applied, BLOCK and tell
+    # the orchestrator to run reclassify first (the candle is left UNSERVED -> the next due_check
+    # returns DUE RETRY, so the self-healing poll re-runs it correctly).
+    try:
+        analyst_reports = load_output("state", args.cycle, "analyst_reports")
+    except FileNotFoundError:
+        analyst_reports = None
+    if reclassify_skipped(regime_state, analyst_reports):
+        print(f"ERROR: reclassify (Phase 4.6) was SKIPPED for cycle {args.cycle} — analyst_reports "
+              f"carry a news risk_off judgement but regime_state.drivers.news_risk_off was never "
+              f"folded (news-blind regime). Run:\n"
+              f"  uv run python scripts/reclassify_cli.py --cycle {args.cycle}\n"
+              f"then re-run the gate.", file=sys.stderr)
+        raise SystemExit(2)
     triggers = payload.get("triggers") or []
     cancel_triggers = payload.get("cancel_triggers") or []  # team retires decayed armed triggers
     now = datetime.now(UTC)  # gate-START instant: stamps the SERVED CANDLE for the due-gate
