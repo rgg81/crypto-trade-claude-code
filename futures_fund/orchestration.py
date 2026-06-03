@@ -47,7 +47,10 @@ def _holding_card(pos, brief: dict, now: datetime, timeframe: str, decision: dic
     """The 'position card' the team reads to decide HOLD vs CLOSE on a carried position:
     current mark, unrealized PnL, progress in R toward target/stop, time held, distance to
     stop/liquidation, and the ORIGINAL thesis + falsifiable prediction it was opened on."""
-    mark = float(brief.get("mark_price") or brief.get("last_close"))
+    # Anchor the mark to the COMPLETED 4h bar (last_close) the desk decides on — NOT the live
+    # Binance mark_price (an index/funding price) — so r_progress matches how triggers/exits
+    # evaluate on the 4h close and reconciles with the audited close. mark_price is a fallback.
+    mark = float(brief.get("last_close") or brief.get("mark_price"))
     sign = 1.0 if pos.direction == "long" else -1.0
     # r_progress measures R earned vs the ORIGINAL risk. Anchor the denominator to the journaled
     # ORIGINAL stop (never trailed), not pos.stop — once a winner's stop trails past entry the
@@ -65,8 +68,12 @@ def _holding_card(pos, brief: dict, now: datetime, timeframe: str, decision: dic
     risk_per_unit = abs(pos.entry - denom_stop) or 1e-9
     tf = _TF_HOURS.get(timeframe, 4.0)
     bars_held = (now - pos.opened_ts).total_seconds() / 3600.0 / tf
+    from futures_fund.portfolio import _is_risk_bearing
     card = {
         "direction": pos.direction, "qty": pos.qty, "entry": pos.entry, "stop": pos.stop,
+        # at_risk: does this leg carry downside (loss-side stop)? Drives the risk-bearing tilt — a
+        # trail that moves the stop to/through entry flips it False and neutralizes tilt_rb.
+        "at_risk": _is_risk_bearing(pos),
         "take_profits": pos.take_profits, "mark": mark, "liq_price": pos.liq_price,
         "unrealized_pnl_pct": round(sign * (mark - pos.entry) / pos.entry, 4),
         "r_progress": round(sign * (mark - pos.entry) / risk_per_unit, 2),

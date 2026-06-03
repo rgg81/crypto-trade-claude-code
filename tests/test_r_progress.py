@@ -64,3 +64,27 @@ def test_r_progress_decision_stop_missing_field_falls_back():
     pos = _pos("long", 100.0, 95.0)
     r = _card(pos, 110.0, {"entry": 100.0, "stop": None})["r_progress"]  # stop None -> legacy
     assert r == 2.0  # abs(100-95)=5 ; (110-100)/5
+
+
+def test_holding_card_prefers_completed_bar_close_over_live_mark():
+    # r_progress/mark must anchor to last_close (the COMPLETED 4h bar the desk decides on), NOT the
+    # live Binance mark_price — matching how triggers/exits evaluate on the 4h close.
+    pos = _pos("long", 100.0, 90.0)
+    card = _holding_card(pos, {"last_close": 120.0, "mark_price": 125.0},
+                         datetime(2026, 6, 1, 4, tzinfo=UTC), "4h", {"entry": 100.0, "stop": 90.0})
+    assert card["mark"] == 120.0                 # completed bar, not the 125.0 live mark
+    assert card["r_progress"] == 2.0             # (120-100)/(100-90)=2.0, not (125-100)/10=2.5
+
+
+def test_holding_card_at_risk_flag():
+    # surfaces whether the leg carries downside risk (drives the risk-bearing tilt / neutralize-trail)
+    dec = {"entry": 100.0, "stop": 90.0}
+    locked = _holding_card(_pos("long", 100.0, 105.0), {"last_close": 120.0},
+                           datetime(2026, 6, 1, 4, tzinfo=UTC), "4h", dec)
+    assert locked["at_risk"] is False            # stop 105 >= entry 100 -> profit-locked
+    at_risk = _holding_card(_pos("long", 100.0, 90.0), {"last_close": 120.0},
+                            datetime(2026, 6, 1, 4, tzinfo=UTC), "4h", dec)
+    assert at_risk["at_risk"] is True            # stop 90 < entry 100 -> loss-side, at risk
+    short_locked = _holding_card(_pos("short", 100.0, 95.0), {"last_close": 80.0},
+                                 datetime(2026, 6, 1, 4, tzinfo=UTC), "4h", dec)
+    assert short_locked["at_risk"] is False       # short stop 95 <= entry 100 -> profit-locked

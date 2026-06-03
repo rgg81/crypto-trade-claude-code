@@ -41,3 +41,25 @@ def record_lesson(memory_dir, text: str, regime: str | None, tags: list[str],
         fh.write(f"\n- [CANDIDATE {ts:%Y-%m-%d}] ({regime or 'any'}/{polarity}) {text} "
                  f"<tags: {', '.join(tags)}; from: {', '.join(provenance)}>\n")
     return lid
+
+
+def record_lessons(memory_dir, lessons: list[dict], ts: datetime) -> list[str]:
+    """Deterministically persist a Reflector's lesson LIST (e.g. state/cycle/N/lessons.json) to the
+    corpus, so the reflect phase ALWAYS appends — never depending on the LLM Reflector agent to
+    remember to call record_lesson (which it did in cycle 22 but not cycle 23). Idempotent by exact
+    text (RETRY-safe): a lesson already in the corpus is skipped; blank text is skipped; missing
+    fields take record_lesson's defaults. Returns the ids of the lessons actually appended."""
+    from futures_fund.lessons import read_lessons
+    existing = {lz.text for lz in read_lessons(memory_dir)}
+    ids: list[str] = []
+    for lesson in lessons:
+        text = str(lesson.get("text") or "").strip()
+        if not text or text in existing:
+            continue
+        ids.append(record_lesson(
+            memory_dir, text=text, regime=lesson.get("regime"), tags=list(lesson.get("tags") or []),
+            importance=int(lesson.get("importance", 5)),
+            provenance=list(lesson.get("provenance") or []), ts=ts,
+            polarity=str(lesson.get("polarity", "restrictive"))))
+        existing.add(text)
+    return ids
