@@ -45,6 +45,10 @@ class TradeProposal(BaseModel):
     funding_rate: float             # current/predicted 8h funding rate (e.g. 0.0001)
     # 8h majors; 4h many perps; per-contract
     funding_interval_hours: float = Field(default=8.0, gt=0)
+    # Optional per-trade risk REDUCTION (e.g. 0.5 = half-size an unproven-edge starter). Lenient
+    # float so a stray value never drops a proposal; the risk gate CLAMPS it to (0,1] so it can only
+    # ever SHRINK a position, never increase risk above the policy cap. Default 1.0 = no-op.
+    risk_mult: float = 1.0
 
     @model_validator(mode="after")
     def _check_stop_side(self) -> TradeProposal:

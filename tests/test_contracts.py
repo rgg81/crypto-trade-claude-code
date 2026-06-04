@@ -46,3 +46,16 @@ def test_to_trade_proposal_maps_fields_and_injects_funding():
     assert tp.symbol == "BTCUSDT" and tp.direction == "long"
     assert tp.funding_rate == 0.0001
     assert tp.risk_per_unit == pytest.approx(5.0)
+
+
+def test_to_trade_proposal_threads_risk_mult():
+    # the optional per-trade risk_mult must flow AgentProposal -> TradeProposal (default 1.0)
+    from futures_fund.contracts import AgentProposal, to_trade_proposal
+    ap = AgentProposal(symbol="BTCUSDT", direction="short", entry=100.0, stop=105.0,
+                       take_profits=[90.0], atr=2.0, confidence=0.6, risk_mult=0.5)
+    tp = to_trade_proposal(ap, funding_rate=0.0001)
+    assert tp.risk_mult == 0.5
+    # default path unchanged
+    ap2 = AgentProposal(symbol="BTCUSDT", direction="long", entry=100.0, stop=95.0,
+                        take_profits=[110.0], atr=2.0, confidence=0.6)
+    assert to_trade_proposal(ap2, 0.0001).risk_mult == 1.0

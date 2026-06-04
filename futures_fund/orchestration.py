@@ -391,6 +391,9 @@ def _proposal_to_stop_entry(p: dict, cycle_no: int):
         falsifiable_prediction=p.get("falsifiable_prediction") or "",
         rationale="[counter-regime -> confirm on 4h close through entry] " + (p.get("rationale") or ""),
         confidence=float(p.get("confidence", 0.5) or 0.5),
+        # preserve any per-trade risk REDUCTION across the counter-regime->trigger rewrite, so a
+        # half-size starter doesn't silently fire at full size when confirmed (gate still clamps)
+        risk_mult=float(p.get("risk_mult", 1.0) or 1.0),
         created_cycle=cycle_no, expires_cycle=cycle_no + 2)
 
 

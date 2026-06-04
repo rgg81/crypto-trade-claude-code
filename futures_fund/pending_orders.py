@@ -30,6 +30,7 @@ class PendingOrder(BaseModel):
     falsifiable_prediction: str = ""
     rationale: str = ""
     confidence: float = 0.5
+    risk_mult: float = 1.0            # optional per-trade risk REDUCTION; gate clamps to (0,1]
     created_cycle: int = 0
     expires_cycle: int = 0
 
@@ -84,7 +85,8 @@ def fired_to_proposal(o: PendingOrder) -> dict:
     confirmed break, it is EXEMPT from the counter-regime confirmation transform (not re-armed)."""
     return {"symbol": o.symbol, "direction": o.direction, "entry": o.trigger_level,
             "stop": o.stop, "take_profits": o.take_profits, "atr": o.atr,
-            "confidence": o.confidence, "falsifiable_prediction": o.falsifiable_prediction,
+            "confidence": o.confidence, "risk_mult": o.risk_mult,
+            "falsifiable_prediction": o.falsifiable_prediction,
             "rationale": f"[trigger:{o.kind}] {o.rationale}"}
 
 

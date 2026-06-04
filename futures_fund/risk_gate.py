@@ -78,10 +78,14 @@ def evaluate(inp: GateInputs) -> RiskDecision:
     if rr < MIN_RR - _RR_EPS:
         return RiskDecision(verdict="veto", reason=f"RR {rr:.2f} < min {MIN_RR}")
 
-    # 3. Effective per-trade risk budget (caps × breaker multiplier)
+    # 3. Effective per-trade risk budget (caps × breaker multiplier × optional per-trade reduction)
     # Caution tier (caps already halved) AND the -5% step-down can both apply on the same
     # drawdown — the compounding de-risk is intentional (survival-first).
-    risk_pct = caps.per_trade_risk_pct * breaker.risk_multiplier
+    # risk_mult is an OPTIONAL per-trade REDUCTION (e.g. half-size an unproven-edge/confirmation
+    # starter). CLAMPED to (0, 1] so it can ONLY ever SHRINK a position — it can never increase risk
+    # above the policy cap or weaken any limit/breaker. None/0 -> 1.0 (no-op); >1 -> 1.0; <0 -> 0.
+    rm = min(1.0, max(0.0, getattr(p, "risk_mult", 1.0) or 1.0))
+    risk_pct = caps.per_trade_risk_pct * breaker.risk_multiplier * rm
 
     # 4. Heat headroom: total open risk vs cap. Conservative — total heat >= any single
     #    correlation cluster's heat, so no unsafe trade slips through. Cluster-aware capping

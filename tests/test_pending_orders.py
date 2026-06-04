@@ -95,3 +95,30 @@ def test_upsert_replaces_by_symbol_dir_kind(tmp_path):
     new = [_o(symbol="BTCUSDT", direction="short", kind="stop_entry", trigger=90)]  # same key, new level
     merged = upsert_triggers(existing, new)
     assert len(merged) == 1 and merged[0].trigger_level == 90
+
+
+def test_fired_trigger_carries_risk_mult():
+    # a PendingOrder's risk_mult must survive into the fired AgentProposal dict (default 1.0)
+    from futures_fund.pending_orders import PendingOrder, fired_to_proposal
+    o = PendingOrder(symbol="ENAUSDT", direction="short", kind="stop_entry",
+                     trigger_level=0.09, stop=0.0995, take_profits=[0.0691], atr=0.0095,
+                     risk_mult=0.5)
+    assert fired_to_proposal(o)["risk_mult"] == 0.5
+    o2 = PendingOrder(symbol="BTCUSDT", direction="long", kind="stop_entry",
+                      trigger_level=100.0, stop=95.0, take_profits=[110.0], atr=2.0)
+    assert fired_to_proposal(o2)["risk_mult"] == 1.0
+
+
+def test_counter_regime_trigger_preserves_risk_mult():
+    # a counter-regime proposal carrying a half-size risk_mult must survive the rewrite to a
+    # confirmation stop_entry (else it would silently fire at full size when confirmed).
+    from futures_fund.orchestration import _proposal_to_stop_entry
+    po = _proposal_to_stop_entry(
+        {"symbol": "ENAUSDT", "direction": "long", "entry": 0.10, "stop": 0.095,
+         "take_profits": [0.12], "atr": 0.005, "risk_mult": 0.5}, cycle_no=5)
+    assert po.risk_mult == 0.5
+    # default preserved when absent
+    po2 = _proposal_to_stop_entry(
+        {"symbol": "BTCUSDT", "direction": "short", "entry": 100.0, "stop": 105.0,
+         "take_profits": [90.0], "atr": 2.0}, cycle_no=5)
+    assert po2.risk_mult == 1.0

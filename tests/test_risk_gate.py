@@ -123,3 +123,46 @@ def test_no_heat_headroom_vetoes_new_entry():
     d = evaluate(_inputs(open_positions=existing))
     assert d.verdict == "veto"
     assert "heat" in d.reason.lower()
+
+
+# ---- per-trade risk_mult: a REDUCTION-ONLY override (clamped to (0,1]) so the team can size an
+# unproven-edge starter smaller. Provably can never increase risk / weaken a limit.
+
+def _approved_qty(**prop_over):
+    d = evaluate(_inputs(proposal=_proposal(**prop_over)))
+    assert d.verdict in ("approve", "resize"), d.reason
+    return d.sized_trade.qty
+
+
+def test_risk_mult_half_halves_qty():
+    # half risk_mult -> half the size (same entry/stop/regime), since dollar risk = eq*risk_pct
+    full = _approved_qty()
+    half = evaluate(_inputs(proposal=_proposal()  # baseline risk_mult defaults to 1.0
+                            .model_copy(update={"risk_mult": 0.5}))).sized_trade.qty
+    assert abs(half - 0.5 * full) < 1e-9
+
+
+def test_risk_mult_default_is_unchanged():
+    # default (no risk_mult) must be identical to an explicit 1.0 — zero behavior change
+    base = _approved_qty()
+    explicit_one = evaluate(_inputs(proposal=_proposal().model_copy(update={"risk_mult": 1.0}))
+                            ).sized_trade.qty
+    assert abs(base - explicit_one) < 1e-12
+
+
+def test_risk_mult_above_one_clamped_to_one():
+    # >1 must be CLAMPED (can NEVER increase risk above the policy cap / weaken a limit)
+    base = _approved_qty()
+    over = evaluate(_inputs(proposal=_proposal().model_copy(update={"risk_mult": 5.0}))
+                    ).sized_trade.qty
+    assert abs(over - base) < 1e-12
+
+
+def test_risk_mult_zero_or_negative_never_increases_risk():
+    # degenerate values must never blow up size: 0 -> treated as full (1.0) NOT infinite; negative
+    # -> clamped to 0 -> qty 0 -> vetoed. Either way risk never exceeds the cap.
+    base = _approved_qty()
+    zero = evaluate(_inputs(proposal=_proposal().model_copy(update={"risk_mult": 0.0})))
+    assert zero.verdict in ("approve", "resize") and abs(zero.sized_trade.qty - base) < 1e-12
+    neg = evaluate(_inputs(proposal=_proposal().model_copy(update={"risk_mult": -0.5})))
+    assert neg.verdict == "veto"  # negative -> 0 risk -> zero qty -> safe veto

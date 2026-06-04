@@ -53,6 +53,7 @@ class AgentProposal(BaseModel):
     rationale: str = ""
     falsifiable_prediction: str = ""  # from the RM plan -> journaled -> tested at HOLD/CLOSE
     confirmation: bool = True         # QuantAgent-style confirmation trigger
+    risk_mult: float = 1.0            # optional per-trade risk REDUCTION; gate clamps to (0,1]
 
 
 _RATING_DIRECTION: dict[str, Direction] = {
@@ -70,5 +71,5 @@ def to_trade_proposal(ap: AgentProposal, funding_rate: float) -> TradeProposal:
     return TradeProposal(
         symbol=ap.symbol, direction=ap.direction, entry=ap.entry, stop=ap.stop,
         take_profits=ap.take_profits, atr=ap.atr, confidence=ap.confidence,
-        horizon_hours=ap.horizon_hours, funding_rate=funding_rate,
+        horizon_hours=ap.horizon_hours, funding_rate=funding_rate, risk_mult=ap.risk_mult,
     )
