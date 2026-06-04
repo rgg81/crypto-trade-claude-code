@@ -40,6 +40,38 @@ def working_universe(exchange, settings: Settings, positions) -> Settings:
         else settings
 
 
+def _regime_panel_briefs(exchange, briefs: list[dict], timeframe: str, now: datetime) -> list[dict]:
+    """Briefs for the canonical regime MAJORS absent from this cycle's universe, so the
+    deterministic regime (breadth + quorum) is read over the STABLE full panel — NOT just whichever
+    majors happen to be in the Watcher's shortlist. A thin shortlist (e.g. only BTC+BNB) otherwise
+    loses quorum (>=3 majors + BTC) and collapses the label to 'mixed' on a deeply risk_off tape
+    (the cycle-29 artifact); persisting these into context['briefs'] also fixes the reclassify
+    recompute, which re-derives quorum from the same briefs. Each is tagged `regime_panel_only` —
+    priced for the regime read, NEVER traded (no proposal sourced from the universe). FAIL-SAFE: a
+    major the exchange can't map (no unified_for_raw) or can't price is skipped, so the regime
+    degrades for it exactly as today and a missing/delisted major never breaks preflight."""
+    from futures_fund.regime import _MAJORS
+    unify = getattr(exchange, "unified_for_raw", None)
+    if unify is None:
+        return []
+    covered = {b.get("exchange_id") for b in briefs}
+    extra = []
+    for raw in _MAJORS:
+        if raw in covered:
+            continue
+        uni = unify(raw)
+        if not uni:
+            continue
+        try:
+            b = build_symbol_brief(exchange, uni, timeframe, now=now)  # last COMPLETED bar
+        except Exception:  # noqa: BLE001 — an unpriceable/missing major must never break preflight
+            continue
+        b["exchange_id"] = raw          # raw id (e.g. ETHUSDT) — the key the regime reads
+        b["regime_panel_only"] = True   # priced for the regime read only; never traded
+        extra.append(b)
+    return extra
+
+
 _TF_HOURS = {"15m": 0.25, "1h": 1.0, "4h": 4.0, "1d": 24.0}
 
 
@@ -154,6 +186,11 @@ def preflight_step(exchange, settings: Settings, state_dir, memory_dir,
             b["holding"] = _holding_card(pos, b, now, settings.timeframe,
                                          decisions_by_id.get(pos.decision_id))
         briefs.append(b)
+    # Guarantee the regime is read over the STABLE canonical majors panel (not just the shortlist):
+    # append briefs for any canonical major absent from the universe so quorum/breadth see them. It
+    # feeds BOTH the preflight regime call below and (via context['briefs']) the Phase-4.6
+    # reclassify recompute. Fail-safe: unpriceable majors are skipped (regime degrades as before).
+    briefs.extend(_regime_panel_briefs(exchange, briefs, settings.timeframe, now))
     try:
         from futures_fund.vendors import archive_jsonl
         for b in briefs:
@@ -405,6 +442,40 @@ def _is_tighter_stop(direction: str, cur_stop: float, new_stop: float, mark: flo
             (direction == "short" and mark < new_stop < cur_stop))
 
 
+_NOISE_BAND_ATR = 0.6  # a stop trailed closer than this many ATR to the mark risks a noise wick-out
+
+
+def _position_atr(ctx, raw_symbol: str, now: datetime, timeframe: str) -> float | None:
+    """ATR of the held symbol's last COMPLETED bar — for the advisory noise-band trail guard.
+    Mirrors the trigger path's last_completed_frame use. Returns None when the frame is unavailable,
+    which disables the guard (it never blocks a trail)."""
+    try:
+        from futures_fund.baseline import _atr
+        uni = ctx.raw_to_unified.get(raw_symbol)
+        df = last_completed_frame(ctx.frames.get(uni), now, timeframe)
+        if df is None or not len(df):
+            return None
+        return float(_atr(df))
+    except Exception:  # noqa: BLE001 — an ATR we can't compute just disables the advisory guard
+        return None
+
+
+def _noise_band_warning(symbol: str, new_stop: float, mark: float | None, atr) -> str | None:
+    """ADVISORY (never a block): a stop trailed to within _NOISE_BAND_ATR of the mark on a high-ATR
+    name risks a noise wick-out — the cycle-28 lesson (a 0.53-ATR stop on a ~7%-ATR name was the
+    flagged noise-stop error). Returns a warning string when the trailed stop is STRICTLY inside the
+    band (distance < _NOISE_BAND_ATR ATR from mark); a stop at/beyond the band is treated as safe.
+    The exact-boundary case is immaterial — this is advisory and new_stop is a discretionary price,
+    never computed as mark - band*atr. No-ops when ATR is unavailable/non-positive."""
+    if mark is None or not atr or atr <= 0:
+        return None
+    dist = abs(mark - new_stop)
+    if dist < _NOISE_BAND_ATR * atr:
+        return (f"trail into noise band {symbol}: new_stop {new_stop:g} is {dist / atr:.2f} ATR "
+                f"from mark {mark:g} (<{_NOISE_BAND_ATR} ATR) — wick-out risk")
+    return None
+
+
 def gate_execute_step(exchange, settings: Settings, state_dir, memory_dir,
                       now: datetime, cycle_no: int, proposals: list[dict],
                       management: list[dict] | None = None,
@@ -497,6 +568,10 @@ def gate_execute_step(exchange, settings: Settings, state_dir, memory_dir,
             ns = m.get("new_stop")
             if ns is not None and _is_tighter_stop(survivor.direction, survivor.stop,
                                                    float(ns), mark):
+                w = _noise_band_warning(p.symbol, float(ns), mark,
+                                        _position_atr(ctx, p.symbol, now, settings.timeframe))
+                if w:
+                    reduce_warnings.append(w)
                 survivor = survivor.model_copy(update={"stop": float(ns)})
                 trailed += 1
             new_positions.append(survivor)
@@ -505,6 +580,10 @@ def gate_execute_step(exchange, settings: Settings, state_dir, memory_dir,
             ns = float(m["new_stop"])
             mark = ctx.prices.get(p.symbol)
             if _is_tighter_stop(p.direction, p.stop, ns, mark):
+                w = _noise_band_warning(p.symbol, ns, mark,
+                                        _position_atr(ctx, p.symbol, now, settings.timeframe))
+                if w:
+                    reduce_warnings.append(w)
                 p = p.model_copy(update={"stop": ns})  # trail only; never loosen
                 trailed += 1
         new_positions.append(p)

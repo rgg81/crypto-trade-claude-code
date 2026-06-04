@@ -530,3 +530,162 @@ def test_preflight_attaches_market_context(tmp_path):
     assert "warnings" in mc
     # the brief now carries derivatives positioning
     assert "long_short_ratio" in ctx["briefs"][0]
+
+
+# ---- Fix A: the regime is classified over the STABLE canonical majors panel, NOT just the
+# Watcher's shortlist. A thin shortlist (e.g. 2 majors) must NOT collapse the label to 'mixed' on a
+# deeply risk_off tape (the cycle-29 quorum artifact). preflight builds regime_panel_only briefs for
+# the canonical majors absent from the universe so quorum/breadth read the full panel. ----
+
+def _downtrend(n=60):
+    rng = np.random.default_rng(11)
+    close = 100.0 - 0.8 * np.arange(n) + rng.normal(0, 0.05, n)
+    return pd.DataFrame({
+        "timestamp": pd.date_range("2026-01-01", periods=n, freq="4h", tz="UTC"),
+        "open": close, "high": close + 0.2, "low": close - 0.2, "close": close, "volume": 1.0,
+    })
+
+
+_MAJORS_UNIFIED = {"BTC/USDT:USDT": "BTCUSDT", "ETH/USDT:USDT": "ETHUSDT",
+                   "BNB/USDT:USDT": "BNBUSDT", "SOL/USDT:USDT": "SOLUSDT",
+                   "XRP/USDT:USDT": "XRPUSDT"}
+
+
+def test_regime_classified_over_full_majors_panel(tmp_path):
+    # Shortlist is ONLY BTC, but all five majors are deeply down. The regime must pull the missing
+    # four majors into the panel so quorum holds (>=3 + BTC) and the tape is labeled risk_off — not
+    # 'mixed' for lack of majors in the shortlist.
+    frames = {u: _downtrend() for u in _MAJORS_UNIFIED}
+    r2u = {raw: u for u, raw in _MAJORS_UNIFIED.items()}
+    ex = _UnionExchange(frames, r2u)  # unified_for_raw maps all five
+    ctx = preflight_step(ex, _settings(), tmp_path / "s", tmp_path / "m",  # _settings symbols=[BTC]
+                         now=dt.datetime(2026, 3, 1, tzinfo=UTC), cycle_no=1,
+                         http_client=_HttpClient())
+    drv = ctx["regime_state"]["drivers"]
+    assert drv["quorum_met"] is True
+    assert set(drv["majors_present"]) == set(_MAJORS_UNIFIED.values())  # all five seen
+    assert drv["deterministic_regime"] == "risk_off"  # deep down-tape labeled, not 'mixed'
+    briefed = {b["exchange_id"] for b in ctx["briefs"]}
+    assert briefed == set(_MAJORS_UNIFIED.values())
+    # only the four majors NOT in the shortlist are tagged regime-panel-only (BTC is a real brief)
+    panel = {b["exchange_id"] for b in ctx["briefs"] if b.get("regime_panel_only")}
+    assert panel == {"ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT"}
+    assert not next(b for b in ctx["briefs"] if b["exchange_id"] == "BTCUSDT").get(
+        "regime_panel_only")
+
+
+def test_regime_panel_augmentation_is_failsafe_without_unified_mapping(tmp_path):
+    # Base FakeExchange has no unified_for_raw and can price only BTC: the panel augmentation must
+    # silently no-op (regime sees only the shortlist, exactly as before) and NEVER crash preflight.
+    ex = FakeExchange({"BTC/USDT:USDT": _downtrend()})
+    ctx = preflight_step(ex, _settings(), tmp_path / "s", tmp_path / "m",
+                         now=dt.datetime(2026, 3, 1, tzinfo=UTC), cycle_no=1,
+                         http_client=_HttpClient())
+    briefed = {b["exchange_id"] for b in ctx["briefs"]}
+    assert briefed == {"BTCUSDT"}  # no panel majors added, no crash
+    assert not any(b.get("regime_panel_only") for b in ctx["briefs"])
+
+
+# ---- Fix B: an advisory (non-blocking) warning when a HOLD/reduce-v2 new_stop is trailed to within
+# ~0.6 ATR of the mark on a high-ATR name (the cycle-28 noise-stop / wick-out lesson). ----
+
+def test_holdings_trail_into_noise_band_warns(tmp_path):
+    state_dir, memory_dir, ex = _seed_holding(tmp_path)  # ETH long, stop 90, mark ~147, ATR ~1
+    mark = float(_uptrend()["close"].iloc[-1])
+    report = gate_execute_step(
+        ex, _settings(), state_dir, memory_dir, now=dt.datetime(2026, 3, 1, tzinfo=UTC),
+        cycle_no=2, proposals=[],
+        management=[{"symbol": "ETHUSDT", "action": "hold", "new_stop": mark - 0.05}])
+    assert report["trailed"] == 1  # the trail STILL applies — the warning never blocks
+    assert load_positions(state_dir)[0].stop == mark - 0.05
+    warns = report.get("warnings", [])
+    assert any("noise band" in w and "ETHUSDT" in w for w in warns)
+
+
+def test_holdings_trail_noise_band_discriminates_by_distance(tmp_path):
+    # Non-vacuous: prove the warning is DISTANCE-driven, not a dead feature. On identical setups
+    # (ETH long, mark ~147, ATR ~1, band ~0.6), an inside-band trail warns and an outside-band trail
+    # is silent — and BOTH trails still apply (advisory never blocks). [Seed 7 -> mark~147, ATR~1.0]
+    mark = float(_uptrend()["close"].iloc[-1])
+    s_in, m_in, ex_in = _seed_holding(tmp_path / "inside")
+    r_in = gate_execute_step(ex_in, _settings(), s_in, m_in,
+                             now=dt.datetime(2026, 3, 1, tzinfo=UTC), cycle_no=2, proposals=[],
+                             management=[{"symbol": "ETHUSDT", "action": "hold",
+                                          "new_stop": mark - 0.05}])
+    s_out, m_out, ex_out = _seed_holding(tmp_path / "outside")
+    r_out = gate_execute_step(ex_out, _settings(), s_out, m_out,  # 110 is ~37 below mark
+                              now=dt.datetime(2026, 3, 1, tzinfo=UTC), cycle_no=2, proposals=[],
+                              management=[{"symbol": "ETHUSDT", "action": "hold",
+                                           "new_stop": 110.0}])
+    assert any("noise band" in w for w in r_in.get("warnings", []))        # inside -> warns
+    assert not any("noise band" in w for w in r_out.get("warnings", []))   # outside -> silent
+    assert r_in["trailed"] == 1 and r_out["trailed"] == 1                  # both trails applied
+
+
+def test_short_position_trail_into_noise_band_warns(tmp_path):
+    # Market-neutral symmetry: the noise-band guard must fire on a SHORT trail too (mark < new_stop
+    # < cur_stop). ETH short, mark ~147; trail the stop to just above mark -> inside the band.
+    from futures_fund.state import Position, save_positions
+    state_dir, memory_dir = tmp_path / "s", tmp_path / "m"
+    mark = float(_uptrend()["close"].iloc[-1])  # ETH mark ~147
+    held = Position(symbol="ETHUSDT", direction="short", qty=2.0, entry=200.0, stop=210.0,
+                    take_profits=[100.0], leverage=3.0, margin=133.0, liq_price=300.0,
+                    opened_cycle=1, opened_ts=dt.datetime(2026, 2, 1, tzinfo=UTC))
+    save_positions(state_dir, [held])
+    ex = _UnionExchange({"BTC/USDT:USDT": _uptrend(), "ETH/USDT:USDT": _uptrend()},
+                        {"ETHUSDT": "ETH/USDT:USDT"})
+    report = gate_execute_step(  # short: mark(147) < new_stop(mark+0.05) < cur_stop(210) -> valid
+        ex, _settings(), state_dir, memory_dir, now=dt.datetime(2026, 3, 1, tzinfo=UTC),
+        cycle_no=2, proposals=[],
+        management=[{"symbol": "ETHUSDT", "action": "hold", "new_stop": mark + 0.05}])
+    assert report["trailed"] == 1
+    assert any("noise band" in w and "ETHUSDT" in w for w in report.get("warnings", []))
+
+
+def test_regime_panel_no_double_count(tmp_path):
+    # BTC and ETH are BOTH in the shortlist AND canonical majors: each must appear exactly once and
+    # NOT be tagged regime_panel_only; only the 3 missing majors are added as panel-only.
+    frames = {u: _downtrend() for u in _MAJORS_UNIFIED}
+    r2u = {raw: u for u, raw in _MAJORS_UNIFIED.items()}
+    ex = _UnionExchange(frames, r2u)
+    settings = Settings(account_size_usdt=10_000.0,
+                        symbols=["BTC/USDT:USDT", "ETH/USDT:USDT"], timeframe="4h")
+    ctx = preflight_step(ex, settings, tmp_path / "s", tmp_path / "m",
+                         now=dt.datetime(2026, 3, 1, tzinfo=UTC), cycle_no=1,
+                         http_client=_HttpClient())
+    ids = [b["exchange_id"] for b in ctx["briefs"]]
+    assert ids.count("BTCUSDT") == 1 and ids.count("ETHUSDT") == 1  # shortlist majors not doubled
+    panel = {b["exchange_id"] for b in ctx["briefs"] if b.get("regime_panel_only")}
+    assert panel == {"BNBUSDT", "SOLUSDT", "XRPUSDT"}  # only the 3 absent majors augmented
+
+
+def test_reclassify_benefits_from_augmented_panel(tmp_path):
+    # The cycle-29 bug was IN reclassify (Phase 4.6 saw only 2 majors). Since the panel is persisted
+    # into context['briefs'], reclassify re-derives quorum/label over the full 5-major panel too.
+    frames = {u: _downtrend() for u in _MAJORS_UNIFIED}
+    r2u = {raw: u for u, raw in _MAJORS_UNIFIED.items()}
+    ex = _UnionExchange(frames, r2u)
+    state_dir = tmp_path / "s"
+    ctx = preflight_step(ex, _settings(), state_dir, tmp_path / "m",  # shortlist = [BTC] only
+                         now=dt.datetime(2026, 3, 1, tzinfo=UTC), cycle_no=1,
+                         http_client=_HttpClient())
+    assert ctx["regime_state"]["drivers"]["quorum_met"] is True  # preflight already full-panel
+    from futures_fund.orchestration import reclassify_step
+    news = [{"agent": "news", "symbol": "BTCUSDT", "signals": {"risk_off_flag": 0}}]
+    rs = reclassify_step(state_dir, ctx, news, now=dt.datetime(2026, 3, 1, tzinfo=UTC))
+    drv = rs["drivers"]
+    assert drv["quorum_met"] is True
+    assert set(drv["majors_present"]) == set(_MAJORS_UNIFIED.values())  # reclassify saw all 5
+    assert drv["deterministic_regime"] == "risk_off"  # not 'mixed' for lack of majors
+
+
+def test_reduce_trail_into_noise_band_warns(tmp_path):
+    state_dir, memory_dir, ex = _seed_holding(tmp_path)  # ETH long qty 1.0, stop 90, mark ~147
+    mark = float(_uptrend()["close"].iloc[-1])
+    report = gate_execute_step(
+        ex, _settings(), state_dir, memory_dir, now=dt.datetime(2026, 3, 1, tzinfo=UTC),
+        cycle_no=2, proposals=[],
+        management=[{"symbol": "ETHUSDT", "action": "reduce", "reduce_fraction": 0.5,
+                     "new_stop": mark - 0.05}])  # banks half AND trails the runner into the band
+    assert report["reduced"] == 1 and report["trailed"] == 1
+    assert any("noise band" in w and "ETHUSDT" in w for w in report.get("warnings", []))
