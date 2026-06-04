@@ -149,3 +149,109 @@ def test_archive_jsonl_keeps_rows_without_key(tmp_path):
     path = tmp_path / "x.jsonl"
     # records lack the dedup key -> all kept, never silently collapsed to one "None"
     assert archive_jsonl(path, [{"a": 1}, {"a": 2}], key="timestamp") == 2
+
+
+_RSS_BODY = b"""<?xml version="1.0"?>
+<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/"><channel>
+<item><title>Markets slide on macro fears</title><link>https://x/1</link>
+<description>&lt;p&gt;A broad selloff hit majors. &lt;b&gt;Solana&lt;/b&gt; led losers as
+funding flipped.&lt;/p&gt;</description>
+<pubDate>Fri, 29 May 2026 14:20:32 +0000</pubDate></item>
+<item><title>Protocol upgrade ships</title><link>https://x/2</link>
+<content:encoded>&lt;div&gt;The Cardano upgrade went live
+with no issues.&lt;/div&gt;</content:encoded>
+<pubDate>Fri, 29 May 2026 15:50:08 +0000</pubDate></item>
+</channel></rss>"""
+
+
+def test_parse_rss_captures_body_and_strips_html():
+    items = parse_rss(_RSS_BODY, source="X", symbols=["SOL", "ADA"])
+    # body captured from <description>, HTML stripped, entities decoded
+    assert "Solana led losers" in items[0].summary
+    assert "<" not in items[0].summary and "&lt;" not in items[0].summary
+    # body captured from <content:encoded> on the 2nd item
+    assert "Cardano upgrade went live" in items[1].summary
+
+
+def test_parse_rss_tags_instruments_from_body_not_just_title():
+    items = parse_rss(_RSS_BODY, source="X", symbols=["SOL", "ADA"])
+    # SOL appears only in the body of item 0 (title is generic) -> still tagged
+    assert "SOL" in items[0].instruments
+    # ADA appears only in the body of item 1 -> still tagged
+    assert "ADA" in items[1].instruments
+
+
+def test_news_item_summary_defaults_empty():
+    n = NewsItem(title="t", url="u", published_at="p", source="s", kind="news", instruments=[])
+    assert n.summary == ""
+
+
+def test_config_has_multiple_news_sources():
+    from futures_fund.config import DataSettings
+    assert len(DataSettings().news_rss_sources) >= 4  # broadened beyond coindesk+cointelegraph
+
+
+# ---- reddit social-sentiment scrape (keyless public JSON) ----
+
+def _reddit_payload(children):
+    return {"data": {"children": [{"kind": "t3", "data": d} for d in children]}}
+
+
+_REDDIT = _reddit_payload([
+    {"title": "Solana looking strong into the bounce", "selftext": "SOL volume surging",
+     "score": 1500, "num_comments": 320},
+    {"title": "Is BTC about to capitulate?", "selftext": "bitcoin sub 60k fear everywhere",
+     "score": 800, "num_comments": 210},
+    {"title": "Daily discussion", "selftext": "general chat about ADA and cardano staking",
+     "score": 50, "num_comments": 900},
+])
+
+
+def test_parse_reddit_extracts_posts_and_tags_from_title_and_body():
+    from futures_fund.vendors import parse_reddit
+    posts = parse_reddit(_REDDIT, subreddit="CryptoCurrency", symbols=["BTC", "SOL", "ADA"])
+    assert len(posts) == 3
+    assert posts[0].score == 1500 and posts[0].source == "CryptoCurrency"
+    assert "SOL" in posts[0].instruments                 # from title+body
+    assert "ADA" in posts[2].instruments                 # 'ADA'/'cardano' only in the body
+
+
+def test_fetch_reddit_aggregates_score_weighted_mentions_and_dedupes():
+    from futures_fund.vendors import fetch_reddit
+    c = _NewsClient({"https://www.reddit.com/r/CryptoCurrency/hot.json": _Resp(payload=_REDDIT),
+                     "https://www.reddit.com/r/CryptoMarkets/hot.json": _Resp(payload=_REDDIT)})
+    out = fetch_reddit(c, subreddits=["CryptoCurrency", "CryptoMarkets"],
+                       symbols=["BTC", "SOL", "ADA"], per_sub=40)
+    assert set(out.keys()) == {"posts", "mentions"}
+    # deduped by title across the two identical subs
+    assert len(out["posts"]) == 3
+    # per-symbol mention aggregation, score-weighted
+    assert out["mentions"]["SOL"]["count"] == 1 and out["mentions"]["SOL"]["score_sum"] == 1500
+    assert out["mentions"]["BTC"]["count"] == 1
+    # posts sorted by score desc (top of the sub first)
+    assert out["posts"][0]["score"] >= out["posts"][-1]["score"]
+
+
+def test_fetch_reddit_degrades_gracefully_on_failure():
+    from futures_fund.vendors import fetch_reddit
+    c = _NewsClient({})   # every sub 404s
+    out = fetch_reddit(c, subreddits=["CryptoCurrency"], symbols=["BTC"], per_sub=40)
+    assert out == {"posts": [], "mentions": {}}
+
+
+def test_config_has_reddit_subreddits():
+    from futures_fund.config import DataSettings
+    assert len(DataSettings().reddit_subreddits) >= 1
+
+
+def test_fetch_reddit_falls_back_to_rss_when_json_blocked():
+    from futures_fund.vendors import fetch_reddit
+    atom = (b'<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom">'
+            b'<entry><title>SOL pumping hard</title><link href="https://r/1"/>'
+            b'<content>solana breakout, FOMO building everywhere</content></entry></feed>')
+    # /hot.json is NOT in the map -> 404 -> fetch_reddit falls back to the /.rss Atom feed
+    c = _NewsClient({"https://www.reddit.com/r/CryptoCurrency/.rss": _Resp(content=atom)})
+    out = fetch_reddit(c, subreddits=["CryptoCurrency"], symbols=["SOL"], per_sub=40)
+    assert len(out["posts"]) == 1 and out["posts"][0]["title"] == "SOL pumping hard"
+    assert out["posts"][0]["score"] == 0           # .rss carries no upvote score
+    assert out["mentions"]["SOL"]["count"] == 1

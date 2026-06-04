@@ -22,10 +22,19 @@ class ExchangeSettings(BaseModel):
 
 
 class DataSettings(BaseModel):
+    # Keyless crypto-news RSS feeds (each degrades independently; a dead/blocked source is skipped).
+    # Broadened beyond coindesk+cointelegraph so the News analyst sees more of the tape.
     news_rss_sources: list[str] = Field(default_factory=lambda: [
         "https://www.coindesk.com/arc/outboundfeeds/rss/?outputType=xml",
         "https://cointelegraph.com/rss",
+        "https://decrypt.co/feed",
+        "https://www.cryptoslate.com/feed/",
+        "https://bitcoinmagazine.com/feed",
+        "https://cryptopotato.com/feed/",
     ])
+    # Keyless reddit social-sentiment scrape (public /hot.json; degrades to empty if blocked).
+    reddit_subreddits: list[str] = Field(
+        default_factory=lambda: ["CryptoCurrency", "CryptoMarkets"])
     fred_key_env: str = "FRED_API_KEY"
     fred_series: list[str] = Field(
         default_factory=lambda: ["DTWEXBGS", "DGS10", "FEDFUNDS", "CPIAUCSL"]

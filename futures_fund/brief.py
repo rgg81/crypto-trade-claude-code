@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from futures_fund.baseline import _atr, simple_regime
+from futures_fund.baseline import _atr, adx, ema_slope, rsi, simple_regime, swing_levels
 
 _TF_SECONDS = {"15m": 900, "1h": 3600, "4h": 14400, "1d": 86400}
 
@@ -62,6 +62,10 @@ def build_symbol_brief(exchange, symbol: str, timeframe: str = "4h",
     last = float(close.iloc[-1])
     regime = simple_regime(df)
     mom_20 = float(close.iloc[-1] / close.iloc[-21] - 1.0) if len(close) > 21 else 0.0
+    # COMPUTED technical indicators (the Technical analyst reads THESE — never invents them): RSI +
+    # ADX(+DI/-DI) for momentum/trend-strength, EMA-20/50 slopes, swing hi/lo for real S/R.
+    adx_val, plus_di, minus_di = adx(df)
+    swing_high, swing_low = swing_levels(df)
     return {
         "symbol": symbol,
         "timeframe": timeframe,
@@ -70,6 +74,16 @@ def build_symbol_brief(exchange, symbol: str, timeframe: str = "4h",
         "trend_direction": regime.trend_direction,
         "atr": float(_atr(df)),
         "momentum_20": mom_20,
+        "rsi": rsi(df),
+        "adx": adx_val,
+        "plus_di": plus_di,
+        "minus_di": minus_di,
+        "ema20_slope": ema_slope(df, 20),
+        "ema50_slope": ema_slope(df, 50),
+        "swing_high": swing_high,
+        "swing_low": swing_low,
+        "dist_to_swing_high_pct": round((swing_high - last) / last, 4) if last else None,
+        "dist_to_swing_low_pct": round((last - swing_low) / last, 4) if last else None,
         "funding_rate": float(funding.current_rate),
         "funding_interval_hours": float(funding.interval_hours),
         "mark_price": float(funding.mark_price),

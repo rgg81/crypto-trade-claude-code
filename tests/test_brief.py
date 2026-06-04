@@ -76,3 +76,25 @@ def test_brief_degrades_when_derivatives_unavailable():
             raise RuntimeError("unavailable")
     b = build_symbol_brief(NoDeriv(_uptrend()), "BTC/USDT:USDT")
     assert b["long_short_ratio"] is None and b["oi_value"] is None
+
+
+def _ohlcv(slope, n=60):
+    import numpy as np
+    import pandas as pd
+    rng = np.random.default_rng(3)
+    close = 100.0 + slope * np.arange(n) + rng.normal(0, 0.05, n)
+    return pd.DataFrame({
+        "timestamp": pd.date_range("2026-01-01", periods=n, freq="4h", tz="UTC"),
+        "open": close, "high": close + 0.3, "low": close - 0.3, "close": close, "volume": 1.0})
+
+
+def test_brief_surfaces_computed_indicators():
+    ex = FakeExchange(_ohlcv(0.6))
+    b = build_symbol_brief(ex, "BTC/USDT:USDT", "4h")
+    for k in ("rsi", "adx", "plus_di", "minus_di", "ema20_slope", "ema50_slope",
+              "swing_high", "swing_low"):
+        assert k in b, f"brief missing computed indicator {k}"
+    assert 0.0 <= b["rsi"] <= 100.0
+    assert b["adx"] >= 0.0
+    assert b["ema20_slope"] > 0           # uptrend frame -> positive slope
+    assert b["swing_low"] <= b["last_close"] <= b["swing_high"]

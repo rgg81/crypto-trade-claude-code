@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from futures_fund.config import Settings
-from futures_fund.vendors import fetch_fear_greed, fetch_macro, fetch_news
+from futures_fund.vendors import fetch_fear_greed, fetch_macro, fetch_news, fetch_reddit
 
 _FRED_SERIES_LABELS = {"DTWEXBGS": "broad_dollar", "DGS10": "ust_10y",
                        "FEDFUNDS": "fed_funds", "CPIAUCSL": "cpi"}
@@ -34,5 +34,16 @@ def build_market_context(http_client, settings: Settings, fred_key: str | None) 
     if not macro:
         warnings.append("macro feed (FRED) unavailable — no DXY/yields/Fed read")
 
-    return {"fear_greed": fear_greed, "news": news, "macro": macro,
+    # Reddit social-sentiment scrape (keyless): real crowd CONTENT per symbol for the Sentiment
+    # analyst, beyond the single Fear&Greed number. Degrades to empty if reddit blocks the read.
+    try:
+        social = fetch_reddit(http_client, list(settings.data.reddit_subreddits),
+                              symbols=settings.symbols)
+        if not social.get("posts"):
+            warnings.append("social feed (reddit) returned no posts — cap social-sentiment read")
+    except Exception:
+        social = {"posts": [], "mentions": {}}
+        warnings.append("social feed (reddit) unavailable — cap social-sentiment read")
+
+    return {"fear_greed": fear_greed, "news": news, "macro": macro, "social": social,
             "macro_labels": _FRED_SERIES_LABELS, "warnings": warnings}
