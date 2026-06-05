@@ -297,3 +297,115 @@ def test_reduce_is_honored_on_halt(tmp_path):
         management=[{"symbol": "ETHUSDT", "action": "reduce", "reduce_fraction": 0.5}])
     assert report["halted"] is True
     assert report["reduced"] == 1 and load_positions(state_dir)[0].qty == 0.5  # trim ran on halt
+
+
+# --- OI-confirmation gate at the GATE level: an opted-in (require_oi_rising) armed trigger fires on
+# its price-break ONLY IF OI is rising at fire time; spent/missing OI HOLDS it armed (fail-safe).
+class _OiRisingEx(FakeExchange):
+    def open_interest_history(self, symbol, period="4h", limit=200):
+        import pandas as pd
+        return pd.DataFrame({
+            "timestamp": pd.date_range("2026-01-01", periods=6, freq="4h", tz="UTC"),
+            "oi_amount": [1.0] * 6,
+            "oi_value": [1.00e7, 1.02e7, 1.04e7, 1.06e7, 1.08e7, 1.10e7]})
+
+
+class _OiBleedingEx(FakeExchange):
+    def open_interest_history(self, symbol, period="4h", limit=200):
+        import pandas as pd
+        return pd.DataFrame({
+            "timestamp": pd.date_range("2026-01-01", periods=6, freq="4h", tz="UTC"),
+            "oi_amount": [1.0] * 6,
+            "oi_value": [1.10e7, 1.08e7, 1.06e7, 1.04e7, 1.02e7, 1.00e7]})
+
+
+class _OiFeedDownEx(FakeExchange):
+    def open_interest_history(self, symbol, period="4h", limit=200):
+        raise RuntimeError("oi feed down")
+
+
+def _armed_oi_short(last, require_oi_rising):
+    # trigger above the last completed close so the price-break (close < trigger) is satisfied;
+    # the OI-gate then decides fire vs hold. RR = 25/7 ~ 3.6 clears the gate.
+    return PendingOrder(symbol="BTCUSDT", direction="short", kind="stop_entry",
+                        trigger_level=last + 5.0, stop=last + 12.0, take_profits=[last - 20.0],
+                        atr=2.0, require_oi_rising=require_oi_rising,
+                        created_cycle=0, expires_cycle=9)
+
+
+def test_gate_oi_gate_fires_when_oi_rising(tmp_path):
+    state_dir, memory_dir = tmp_path / "s", tmp_path / "m"
+    ex = _OiRisingEx({"BTC/USDT:USDT": _uptrend()})
+    last = _pf(state_dir, memory_dir, ex)["briefs"][0]["last_close"]
+    save_pending_orders(state_dir, [_armed_oi_short(last, True)])
+    report = gate_execute_step(ex, _settings(), state_dir, memory_dir, now=NOW, cycle_no=1,
+                               proposals=[], regime_state=_regime("risk_off"))
+    assert report["triggers_fired"] == 1 and report["opened"] == 1
+
+
+def test_gate_oi_gate_holds_when_oi_bleeding(tmp_path):
+    state_dir, memory_dir = tmp_path / "s", tmp_path / "m"
+    ex = _OiBleedingEx({"BTC/USDT:USDT": _uptrend()})
+    last = _pf(state_dir, memory_dir, ex)["briefs"][0]["last_close"]
+    save_pending_orders(state_dir, [_armed_oi_short(last, True)])
+    report = gate_execute_step(ex, _settings(), state_dir, memory_dir, now=NOW, cycle_no=1,
+                               proposals=[], regime_state=_regime("risk_off"))
+    assert report["triggers_fired"] == 0 and report["triggers_remaining"] == 1  # break held, armed
+
+
+def test_gate_oi_gate_holds_on_feed_down(tmp_path):
+    # OI feed raises -> oi_change None -> fail-closed: the opted-in break does NOT fire (no phantom)
+    state_dir, memory_dir = tmp_path / "s", tmp_path / "m"
+    ex = _OiFeedDownEx({"BTC/USDT:USDT": _uptrend()})
+    last = _pf(state_dir, memory_dir, ex)["briefs"][0]["last_close"]
+    save_pending_orders(state_dir, [_armed_oi_short(last, True)])
+    report = gate_execute_step(ex, _settings(), state_dir, memory_dir, now=NOW, cycle_no=1,
+                               proposals=[], regime_state=_regime("risk_off"))
+    assert report["triggers_fired"] == 0 and report["triggers_remaining"] == 1
+
+
+def test_gate_oi_gate_default_off_fires_regardless_of_oi(tmp_path):
+    # a DEFAULT trigger (require_oi_rising=False) fires on the break even with bleeding OI = today's
+    # behavior; the OI feed is never even consulted for it (inert on the hot path).
+    state_dir, memory_dir = tmp_path / "s", tmp_path / "m"
+    ex = _OiBleedingEx({"BTC/USDT:USDT": _uptrend()})
+    last = _pf(state_dir, memory_dir, ex)["briefs"][0]["last_close"]
+    save_pending_orders(state_dir, [_armed_oi_short(last, False)])
+    report = gate_execute_step(ex, _settings(), state_dir, memory_dir, now=NOW, cycle_no=1,
+                               proposals=[], regime_state=_regime("risk_off"))
+    assert report["triggers_fired"] == 1 and report["opened"] == 1
+
+
+def test_gate_no_oi_fetch_when_no_trigger_opts_in(tmp_path):
+    # must-fix #2: the OI feed must NOT be hit by the GATE when no armed trigger opts in (the
+    # feature is inert on the execution hot path by default — no latency/rate-limit regression).
+    class _CountingEx(FakeExchange):
+        oi_calls = 0
+        def open_interest_history(self, *a, **k):
+            type(self).oi_calls += 1
+            return super().open_interest_history(*a, **k)
+    state_dir, memory_dir = tmp_path / "s", tmp_path / "m"
+    ex = _CountingEx({"BTC/USDT:USDT": _uptrend()})
+    last = _pf(state_dir, memory_dir, ex)["briefs"][0]["last_close"]
+    save_pending_orders(state_dir, [_armed_oi_short(last, False)])   # default: NOT opted in
+    _CountingEx.oi_calls = 0   # ignore preflight's brief OI reads; count only the gate
+    gate_execute_step(ex, _settings(), state_dir, memory_dir, now=NOW, cycle_no=1,
+                      proposals=[], regime_state=_regime("risk_off"))
+    assert _CountingEx.oi_calls == 0
+
+
+def test_gate_fetches_oi_only_for_opted_in_symbol(tmp_path):
+    # the opted-in symbol's OI IS fetched at fire time (the other half of must-fix #2's gating).
+    class _CountingEx(_OiRisingEx):
+        oi_calls = 0
+        def open_interest_history(self, *a, **k):
+            type(self).oi_calls += 1
+            return super().open_interest_history(*a, **k)
+    state_dir, memory_dir = tmp_path / "s", tmp_path / "m"
+    ex = _CountingEx({"BTC/USDT:USDT": _uptrend()})
+    last = _pf(state_dir, memory_dir, ex)["briefs"][0]["last_close"]
+    save_pending_orders(state_dir, [_armed_oi_short(last, True)])   # opted in
+    _CountingEx.oi_calls = 0
+    gate_execute_step(ex, _settings(), state_dir, memory_dir, now=NOW, cycle_no=1,
+                      proposals=[], regime_state=_regime("risk_off"))
+    assert _CountingEx.oi_calls >= 1

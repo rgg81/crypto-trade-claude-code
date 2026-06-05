@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from futures_fund.brief import build_symbol_brief, last_completed_frame
+from futures_fund.brief import build_symbol_brief, last_completed_frame, oi_change_for
 from futures_fund.config import Settings
 from futures_fund.contracts import to_trade_proposal
 from futures_fund.costs import count_funding_events
@@ -394,6 +394,9 @@ def _proposal_to_stop_entry(p: dict, cycle_no: int):
         # preserve any per-trade risk REDUCTION across the counter-regime->trigger rewrite, so a
         # half-size starter doesn't silently fire at full size when confirmed (gate still clamps)
         risk_mult=float(p.get("risk_mult", 1.0) or 1.0),
+        # carry an explicit OI-confirmation opt-in if the Trader set one; absent -> False so a
+        # counter-regime SAFETY trigger is never double-gated on OI (no spurious feed-outage block)
+        require_oi_rising=bool(p.get("require_oi_rising", False)),
         created_cycle=cycle_no, expires_cycle=cycle_no + 2)
 
 
@@ -596,7 +599,13 @@ def gate_execute_step(exchange, settings: Settings, state_dir, memory_dir,
     # proposals (at the trigger price) competing in the SAME gate. Held-symbol orders are skipped
     # (no stacking). On HALT a fired trigger is consumed but NOT opened (like a fresh open). ----
     held_symbols = {p.symbol for p in positions}
+    # OI-confirmation source: only symbols with an armed require_oi_rising trigger need a (reactive,
+    # completed-bar) OI read at fire time. When NO order opts in -> zero new OI calls (inert on the
+    # execution hot path by default). Any feed error -> None -> the gate fail-closes (holds the
+    # trigger, never a spurious fire).
+    oi_gate_syms = {o.symbol for o in pending if getattr(o, "require_oi_rising", False)}
     bars_by_symbol: dict = {}
+    oi_change_by_symbol: dict = {}
     for raw, uni in ctx.raw_to_unified.items():
         # A stop_entry/limit_entry must fire off the latest COMPLETED 4h bar — NOT the still-forming
         # candle the OHLCV feed returns as iloc[-1] (its transient close flips on every tick). Drop
@@ -610,8 +619,11 @@ def gate_execute_step(exchange, settings: Settings, state_dir, memory_dir,
                                    "close": float(bar["close"])}
         except (KeyError, TypeError, ValueError):
             pass
+        if raw in oi_gate_syms:   # completed-bar OI aligned to the same `now` the bar was read at
+            oi_change_by_symbol[raw] = oi_change_for(exchange, uni, settings.timeframe, now)
     fired, expired, remaining = check_pending_orders(state_dir, bars_by_symbol, cycle_no,
-                                                     held_symbols=held_symbols)
+                                                     held_symbols=held_symbols,
+                                                     oi_change_by_symbol=oi_change_by_symbol)
 
     # --- Explicit cancellation: the Trader/RM may RETIRE an armed trigger whose thesis decayed, via
     # the normal proposals flow (`cancel_triggers`), so the TEAM cancels — not a manual store edit.

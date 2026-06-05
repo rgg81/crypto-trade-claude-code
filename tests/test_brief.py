@@ -1,4 +1,4 @@
-from datetime import UTC
+from datetime import UTC, datetime
 
 import numpy as np
 import pandas as pd
@@ -98,3 +98,72 @@ def test_brief_surfaces_computed_indicators():
     assert b["adx"] >= 0.0
     assert b["ema20_slope"] > 0           # uptrend frame -> positive slope
     assert b["swing_low"] <= b["last_close"] <= b["swing_high"]
+
+
+# --- oi_change_for: REACTIVE, completed-bar-aligned OI change for the trigger OI-gate ----------
+# Intentionally a shorter window than _derivatives' 48h analyst trend; drops the forming OI row so
+# it matches the completed-bar frame the trigger fires on; NaN/zero-base/short/error -> None.
+class _OiEx:
+    """Exchange stub returning a configurable OI series (with controllable timestamps)."""
+    def __init__(self, oi_values, ts_start="2026-01-01", freq="4h"):
+        import pandas as pd
+        n = len(oi_values)
+        self._df = pd.DataFrame({
+            "timestamp": pd.date_range(ts_start, periods=n, freq=freq, tz="UTC"),
+            "oi_amount": [1.0] * n, "oi_value": list(oi_values)})
+
+    def open_interest_history(self, symbol, period="4h", limit=200):
+        return self._df
+
+
+_FAR_NOW = datetime(2026, 6, 1, tzinfo=UTC)  # far after the 2026-01 fixtures -> nothing forming
+
+
+def test_oi_change_for_positive_when_rising():
+    from futures_fund.brief import oi_change_for
+    ex = _OiEx([1.00e7, 1.02e7, 1.04e7, 1.06e7, 1.08e7, 1.10e7])
+    v = oi_change_for(ex, "BTC/USDT:USDT", "4h", now=_FAR_NOW, lookback=4)
+    assert v is not None and v > 0
+
+
+def test_oi_change_for_negative_when_bleeding():
+    from futures_fund.brief import oi_change_for
+    ex = _OiEx([1.10e7, 1.08e7, 1.06e7, 1.04e7, 1.02e7, 1.00e7])
+    v = oi_change_for(ex, "BTC/USDT:USDT", "4h", now=_FAR_NOW, lookback=4)
+    assert v is not None and v < 0
+
+
+def test_oi_change_for_drops_forming_row():
+    # the freshest OI row is the still-FORMING window (ts within now's 4h window) and is a huge
+    # spike that would flip the sign if read; aligning to completed bars must DROP it.
+    from futures_fund.brief import oi_change_for
+    now = datetime(2026, 6, 1, 2, tzinfo=UTC)             # inside the window opening 06-01 00:00
+    ex = _OiEx([1.0e7, 1.0e7, 1.0e7, 0.9e7, 5.0e7],       # last row (06-01 00:00) is forming
+               ts_start="2026-05-31 08:00")
+    v = oi_change_for(ex, "BTC/USDT:USDT", "4h", now=now, lookback=4)
+    assert v is not None and v <= 0   # forming 5e7 spike dropped -> completed series ends at 0.9e7
+
+
+def test_oi_change_for_none_on_zero_base():
+    from futures_fund.brief import oi_change_for
+    ex = _OiEx([0.0, 1.0e7, 1.05e7])
+    assert oi_change_for(ex, "BTC/USDT:USDT", "4h", now=_FAR_NOW) is None
+
+
+def test_oi_change_for_none_on_nan():
+    from futures_fund.brief import oi_change_for
+    assert oi_change_for(_OiEx([float("nan"), 1.0e7, 1.05e7]), "B", "4h", now=_FAR_NOW) is None
+    assert oi_change_for(_OiEx([1.0e7, 1.0e7, float("nan")]), "B", "4h", now=_FAR_NOW) is None
+
+
+def test_oi_change_for_none_on_short_series():
+    from futures_fund.brief import oi_change_for
+    assert oi_change_for(_OiEx([1.0e7]), "B", "4h", now=_FAR_NOW) is None
+
+
+def test_oi_change_for_none_on_feed_error():
+    from futures_fund.brief import oi_change_for
+    class _Boom:
+        def open_interest_history(self, *a, **k):
+            raise RuntimeError("feed down")
+    assert oi_change_for(_Boom(), "B", "4h", now=_FAR_NOW) is None

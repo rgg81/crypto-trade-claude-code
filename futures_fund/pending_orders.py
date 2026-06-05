@@ -11,11 +11,16 @@ a confirmed break, so it is exempt from the gate's counter-regime confirmation t
 from __future__ import annotations
 
 import json
+import math
 import os
 import uuid
 from pathlib import Path
 
 from pydantic import BaseModel, Field
+
+# A require_oi_rising stop_entry fires on its price-break ONLY IF reactive OI growth exceeds this
+# deadband. +0.5% (not strict >0) so flat/noise OI does NOT count as 'rising' fuel.
+OI_RISING_EPS = 0.005
 
 
 class PendingOrder(BaseModel):
@@ -31,6 +36,11 @@ class PendingOrder(BaseModel):
     rationale: str = ""
     confidence: float = 0.5
     risk_mult: float = 1.0            # optional per-trade risk REDUCTION; gate clamps to (0,1]
+    # OPT-IN OI-confirmation: when True, this stop_entry may fire on its price-break ONLY IF OI is
+    # rising at fire time (fresh fuel confirming the break); a spent-OI break is a bounce-trap and
+    # HOLDS the trigger armed. Default False = today's behavior (OI never consulted). Symmetric:
+    # applied identically to a flush-SHORT down-break and a squeeze-LONG up-break.
+    require_oi_rising: bool = False
     created_cycle: int = 0
     expires_cycle: int = 0
 
@@ -96,8 +106,18 @@ def _wrong_side_stop(o: PendingOrder) -> bool:
            (o.direction == "short" and o.stop <= o.trigger_level)
 
 
+def _oi_confirms(oi_change_by_symbol, symbol: str) -> bool:
+    """OI-confirmation predicate for require_oi_rising triggers: True ONLY if fresh OI is RISING
+    (> OI_RISING_EPS) for `symbol`. Missing / None / NaN -> False (FAIL-SAFE: the break HOLDS the
+    trigger armed, never a spurious fire). Direction-AGNOSTIC — one predicate applied identically to
+    long and short, so the OI-gate cannot introduce a long/short bias (market-neutral mandate)."""
+    oi = (oi_change_by_symbol or {}).get(symbol)
+    return oi is not None and not math.isnan(oi) and oi > OI_RISING_EPS
+
+
 def check_pending_orders(state_dir, bars_by_symbol: dict, cycle_no: int,
-                         held_symbols=frozenset()) -> tuple[list, list, list]:
+                         held_symbols=frozenset(),
+                         oi_change_by_symbol: dict | None = None) -> tuple[list, list, list]:
     """Evaluate every armed order against the latest COMPLETED 4h bar (RAW-keyed). Returns
     (fired, expired, remaining) — disjoint. FIRE precedes EXPIRY. Held-symbol, knife-guarded, and
     wrong-side orders are CONSUMED (in none of the three lists -> removed from the store). No-bar
@@ -113,6 +133,8 @@ def check_pending_orders(state_dir, bars_by_symbol: dict, cycle_no: int,
             if o.kind == "stop_entry":  # confirmed break on the bar CLOSE
                 fire = (o.direction == "short" and close is not None and close < o.trigger_level) or \
                        (o.direction == "long" and close is not None and close > o.trigger_level)
+                if fire and o.require_oi_rising:   # symmetric fresh-OI gate (fail-safe)
+                    fire = _oi_confirms(oi_change_by_symbol, o.symbol)
             else:                        # limit_entry: TOUCH of the level
                 if o.direction == "long" and low is not None and low <= o.trigger_level:
                     if low <= o.stop:    # knife guard: bar tagged trigger AND stop in one bar

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import math
 from datetime import datetime
 
 from futures_fund.baseline import _atr, adx, ema_slope, rsi, simple_regime, swing_levels
 
 _TF_SECONDS = {"15m": 900, "1h": 3600, "4h": 14400, "1d": 86400}
+OI_REACTIVE_LOOKBACK = 4   # completed 4h bars back (~16h) for the trigger OI-gate's reactive window
 
 
 def last_completed_frame(df, now: datetime | None, timeframe: str = "4h"):
@@ -28,6 +30,36 @@ def last_completed_frame(df, now: datetime | None, timeframe: str = "4h"):
     except Exception:  # noqa: BLE001 — never break the cycle over bar housekeeping
         pass
     return df
+
+
+def oi_change_for(exchange, symbol: str, timeframe: str = "4h", now: datetime | None = None,
+                  lookback: int = OI_REACTIVE_LOOKBACK) -> float | None:
+    """REACTIVE, completed-bar-aligned open-interest change for the trigger OI-confirmation gate:
+    (last completed OI bar / the bar ~`lookback` intervals prior) - 1.0. DELIBERATELY a shorter,
+    more reactive window than `_derivatives`' 48h analyst trend — it confirms fresh fuel arriving ON
+    a break (trapped longs flushing / shorts trapping right now), not a 2-day positioning trend.
+    Drops the still-FORMING OI row (via last_completed_frame) so it reads the SAME completed-bar
+    frame the trigger fires on — never a tick-mutating forming value (the bug last_completed_frame
+    exists to kill). Pass `now` (the gate's fire-time instant) for completed-bar alignment; with
+    now=None NO row is dropped, so a caller wanting alignment MUST supply it. Returns None on any
+    feed error, NaN, zero base, or a too-short series; the
+    pending-orders gate treats None as 'unconfirmed' and HOLDS the trigger (fail-safe: a missing
+    reading can NEVER cause a spurious fire). NOTE: rising AGGREGATE OI is a necessary-but-not-
+    sufficient proxy for new positioning in the break direction (it cannot distinguish new-shorts
+    from new-longs) — a fuel filter, not a direction oracle."""
+    try:
+        oi = exchange.open_interest_history(symbol, period=timeframe, limit=lookback + 3)
+        oi = last_completed_frame(oi, now, timeframe)
+        s = oi["oi_value"]
+        if len(s) < 2:
+            return None
+        last = float(s.iloc[-1])
+        base = float(s.iloc[max(0, len(s) - 1 - lookback)])
+        if not base or math.isnan(base) or math.isnan(last):
+            return None
+        return last / base - 1.0
+    except Exception:  # noqa: BLE001 — any feed/parse error -> None -> gate HOLDS (fail-safe)
+        return None
 
 
 def _derivatives(exchange, symbol: str, timeframe: str) -> dict:
