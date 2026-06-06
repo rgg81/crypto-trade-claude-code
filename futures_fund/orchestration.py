@@ -176,6 +176,19 @@ def preflight_step(exchange, settings: Settings, state_dir, memory_dir,
                               recent_hit_rate=hit_rate(memory_dir, _AGENT_KEY))
     scorecard = _with_exposure_warning(build_scorecard(state_dir, memory_dir, monthly_target=0.05),
                                        exposure)
+    # Pillar 1 DEPLOY: month-to-date risk pacing — surfaces a deploy directive (soft/normal/press/
+    # throttle) the team reads to actively pursue 5%/mo. Advisory/utilization-only; anti-martingale
+    # (drawdown never presses); the gate's protected caps are unchanged. Fail-safe -> soft on error.
+    try:
+        from futures_fund.pacing import pacing_state
+        _ps = pacing_state(state_dir, now, health, monthly_target=0.05)
+        pacing = {"mode": _ps.mode, "appetite": _ps.appetite,
+                  "suggested_risk_mult": _ps.suggested_risk_mult, "mtd_return": _ps.mtd_return,
+                  "pace": _ps.pace, "pace_gap": _ps.pace_gap, "in_drawdown": _ps.in_drawdown,
+                  "directive": _ps.directive}
+    except Exception:  # noqa: BLE001 — pacing is advisory; never break the cycle
+        pacing = {"mode": "soft", "directive": "SOFT — pacing unavailable; trade conservatively.",
+                  "suggested_risk_mult": 0.5}
     from futures_fund.journal import read_open_decisions
     held_by_raw = {p.symbol: p for p in positions}
     decisions_by_id = {d.get("id"): d for d in read_open_decisions(memory_dir)}
@@ -212,6 +225,7 @@ def preflight_step(exchange, settings: Settings, state_dir, memory_dir,
         "exposure": exposure,
         "regime_state": _classify_regime_safe(state_dir, market_context, briefs, now, cycle_no),
         "scorecard": scorecard,
+        "pacing": pacing,
     }
 
 
