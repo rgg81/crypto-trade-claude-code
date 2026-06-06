@@ -189,6 +189,13 @@ def preflight_step(exchange, settings: Settings, state_dir, memory_dir,
     except Exception:  # noqa: BLE001 — pacing is advisory; never break the cycle
         pacing = {"mode": "soft", "directive": "SOFT — pacing unavailable; trade conservatively.",
                   "suggested_risk_mult": 0.5}
+    # Pillar 3 IMPROVE: read-only improvement panel (deployment rate, corpus two-sidedness, return
+    # trend) so the team + the month-end meta-reflection can see whether the desk is getting better.
+    try:
+        from futures_fund.improvement import improvement_panel
+        improvement = improvement_panel(state_dir, memory_dir)
+    except Exception:  # noqa: BLE001 — advisory; never break the cycle
+        improvement = {}
     from futures_fund.journal import read_open_decisions
     held_by_raw = {p.symbol: p for p in positions}
     decisions_by_id = {d.get("id"): d for d in read_open_decisions(memory_dir)}
@@ -233,6 +240,7 @@ def preflight_step(exchange, settings: Settings, state_dir, memory_dir,
         "regime_state": _classify_regime_safe(state_dir, market_context, briefs, now, cycle_no),
         "scorecard": scorecard,
         "pacing": pacing,
+        "improvement": improvement,
     }
 
 
