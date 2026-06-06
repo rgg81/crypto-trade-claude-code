@@ -57,14 +57,27 @@ def patch_flat_outcome(memory_dir, fid: str, fields: dict) -> bool:
 
 
 def evaluate_pending_flats(memory_dir, marks: dict[str, float], now: datetime,
-                           *, min_move: float = 0.02) -> int:
-    """For each un-evaluated, edge-aligned FLAT, compare the decision mark to the current mark in
-    the setup's FAVORED direction. `flat_cost_us` is True when price moved >= min_move our way
-    (standing aside cost us) and False when it moved against (standing aside was right). Only
-    edge-aligned flats are evaluated (those are the ones whose suppression is the bug). Returns the
-    number newly evaluated."""
+                           *, now_cycle: int | None = None, eval_after_cycles: int = 6,
+                           min_move: float = 0.02) -> int:
+    """Score un-evaluated, edge-aligned FLATs by how price moved in the setup's FAVORED direction —
+    but over a MULTI-DAY horizon, not the next-candle bounce. Two mechanics fix the short-horizon
+    artifact that kept 'vindicating' the holds on 1-cycle noise:
+
+    1. HORIZON GATING — a decision FINALIZES (`evaluated=True`) only once it is `eval_after_cycles`
+       cycles old (≈24h on the 4h cadence, a multi-day window). Before that it stays pending, so a
+       single-candle bounce can never lock the verdict. (Falls back to immediate single-shot eval
+       when `now_cycle` is unknown — preserves the legacy call/tests.)
+    2. MAX FAVORABLE EXCURSION — while pending, each call advances a running `max_favored_move`, so
+       a declined trade that trends our way then ROUND-TRIPS still registers the move it would have
+       captured (the desk's trades carry take-profits; they don't sit through a full round-trip).
+       `favored_move_pct` (and `flat_cost_us`) use that peak; `endpoint_move_pct` keeps the last
+       mark for transparency.
+
+    `flat_cost_us` = the peak favorable excursion over the window >= min_move (standing aside cost
+    us). Only edge-aligned flats are evaluated. Returns the number NEWLY FINALIZED this call."""
     rows = read_flat_decisions(memory_dir)
     n = 0
+    dirty = False
     for r in rows:
         if r.get("evaluated") or not r.get("edge_aligned"):
             continue
@@ -74,10 +87,20 @@ def evaluate_pending_flats(memory_dir, marks: dict[str, float], now: datetime,
             continue
         side = r.get("favored_side", "long")
         move = (m1 - m0) / m0 * (1.0 if side == "long" else -1.0)
-        r.update({"evaluated": True, "eval_mark": m1,
-                  "eval_ts": now.isoformat() if hasattr(now, "isoformat") else now,
-                  "favored_move_pct": move, "flat_cost_us": move >= min_move})
-        n += 1
-    if n:
+        prev_max = r.get("max_favored_move")
+        max_move = move if prev_max is None else max(prev_max, move)
+        dcyc = r.get("cycle")
+        ready = now_cycle is None or dcyc is None or (now_cycle - dcyc) >= eval_after_cycles
+        if ready:
+            r.update({"evaluated": True, "eval_mark": m1,
+                      "eval_ts": now.isoformat() if hasattr(now, "isoformat") else now,
+                      "max_favored_move": max_move, "endpoint_move_pct": move,
+                      "favored_move_pct": max_move, "flat_cost_us": max_move >= min_move})
+            n += 1
+            dirty = True
+        elif max_move != prev_max:           # still pending — just advance the running peak
+            r["max_favored_move"] = max_move
+            dirty = True
+    if dirty:
         _write_all(memory_dir, rows)
     return n

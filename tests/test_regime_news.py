@@ -358,7 +358,7 @@ def test_classify_safe_explicit_true_applies(tmp_path):
 
 # ---- Phase 4.6 fail-loud guard: a SKIPPED reclassify must not pass the gate silently ----
 
-from futures_fund.orchestration import reclassify_skipped  # noqa: E402
+from futures_fund.orchestration import funnel_skipped, reclassify_skipped  # noqa: E402
 
 
 def test_reclassify_step_stamps_reclassified_marker(tmp_path):
@@ -397,6 +397,25 @@ def test_reclassify_skipped_false_on_halt_no_news_reports():
 def test_reclassify_skipped_false_on_bad_inputs():
     assert reclassify_skipped(None, [_news("BTCUSDT", 1)]) is False
     assert reclassify_skipped({"drivers": {"news_risk_off": None}}, "not-a-list") is False
+
+
+# ---- Funnel guard: a WHOLE skipped analyst pass (reports missing) on a TRADING cycle blocks ----
+
+def test_funnel_skipped_true_when_trades_submitted_but_reports_missing():
+    # the cy43 failure mode: triggers/proposals submitted but analyst_reports.json absent entirely
+    assert funnel_skipped(None, [], [{"symbol": "SOLUSDT"}]) is True   # a trigger, no reports
+    assert funnel_skipped(None, [{"symbol": "BTCUSDT"}], []) is True   # a proposal, no reports
+    assert funnel_skipped([], [{"symbol": "X"}], []) is True            # present-but-empty reports
+
+
+def test_funnel_skipped_false_when_reports_present():
+    assert funnel_skipped([_news("BTCUSDT", 1)], [], [{"symbol": "SOLUSDT"}]) is False
+
+
+def test_funnel_skipped_false_on_standdown_no_trades():
+    # a genuine stand-down / HALT submits EMPTY proposals AND triggers -> exempt with no reports
+    assert funnel_skipped(None, [], []) is False
+    assert funnel_skipped(None, None, None) is False
 
 
 # ---- Sticky/decaying news shock: an unresolved shock must not lapse when its headline ages off ----

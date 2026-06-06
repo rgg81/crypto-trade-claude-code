@@ -158,7 +158,8 @@ def preflight_step(exchange, settings: Settings, state_dir, memory_dir,
     # so the Reflector can mint enabling 'DO take it' lessons (a FLAT that moved our way cost us).
     try:
         from futures_fund.flat_journal import evaluate_pending_flats
-        evaluate_pending_flats(memory_dir, dict(ctx.prices), now)
+        # finalize a declined-flat's verdict only after a multi-day horizon (not the 1-cycle bounce)
+        evaluate_pending_flats(memory_dir, dict(ctx.prices), now, now_cycle=cycle_no)
     except Exception:
         pass  # learning evaluation must never break the trading cycle
     from futures_fund.scorecard import build_scorecard
@@ -318,6 +319,17 @@ def reclassify_skipped(regime_state, analyst_reports) -> bool:
         return False  # news judged True/False -> folded (backward-compat for pre-marker contexts)
     reports = analyst_reports if isinstance(analyst_reports, list) else []
     return any(isinstance(r, dict) and r.get("agent") == "news" for r in reports)
+
+
+def funnel_skipped(analyst_reports, proposals, triggers) -> bool:
+    """Fail-loud guard for a WHOLE skipped analyst funnel (Phases 4-4.6). True when the cycle sends
+    TRADES (non-empty proposals OR triggers) but analyst_reports.json is absent/empty — i.e. the
+    analyst pass / screen / reclassify were skipped entirely yet orders are being sent. A genuine
+    stand-down (and a HALT) submits EMPTY proposals AND triggers, so it never blocks. Complements
+    reclassify_skipped (which catches a skipped news-FOLD only when the reports DO exist) — closing
+    the gap that let an entirely-skipped funnel pass silently on a news-blind preflight regime."""
+    has_trades = bool(proposals) or bool(triggers)
+    return has_trades and not analyst_reports
 
 
 def screen_step(reports, top_n: int = 5) -> list[str]:

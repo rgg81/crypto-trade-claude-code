@@ -13,6 +13,7 @@ from futures_fund.config import load_settings
 from futures_fund.cycle_io import load_output, save_output
 from futures_fund.exchange import FuturesExchange
 from futures_fund.orchestration import (
+    funnel_skipped,
     gate_execute_step,
     management_review,
     reclassify_skipped,
@@ -63,6 +64,16 @@ def main() -> None:
         analyst_reports = load_output("state", args.cycle, "analyst_reports")
     except FileNotFoundError:
         analyst_reports = None
+    # FAIL-LOUD: a cycle that submits TRADES but has NO analyst_reports.json skipped the whole
+    # analyst funnel (Phases 4-4.6). Block so it can't execute on a news-blind preflight regime; the
+    # candle stays UNSERVED -> next due_check returns DUE RETRY and the poll re-runs it correctly.
+    if funnel_skipped(analyst_reports, payload.get("proposals"), payload.get("triggers")):
+        print(f"ERROR: cycle {args.cycle} submits trades (proposals/triggers) but "
+              f"analyst_reports.json is MISSING — the analyst pass / screen / reclassify (Phases "
+              f"4-4.6) were SKIPPED. Run the full funnel (4 analysts -> screen -> reclassify) "
+              f"first. A genuine stand-down must submit EMPTY proposals AND triggers.",
+              file=sys.stderr)
+        raise SystemExit(2)
     if reclassify_skipped(regime_state, analyst_reports):
         print(f"ERROR: reclassify (Phase 4.6) was SKIPPED for cycle {args.cycle} — analyst_reports "
               f"carry a news risk_off judgement but regime_state.drivers.news_risk_off was never "

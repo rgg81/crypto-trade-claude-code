@@ -62,3 +62,46 @@ def test_evaluate_is_idempotent(tmp_path):
     evaluate_pending_flats(tmp_path, {"XLMUSDT": 105.0}, datetime(2026, 5, 31, 4, tzinfo=UTC))
     again = evaluate_pending_flats(tmp_path, {"XLMUSDT": 110.0}, datetime(2026, 5, 31, 8, tzinfo=UTC))
     assert again == 0  # already evaluated, not re-scored
+
+
+# --- multi-day eval horizon + max favorable excursion (fix: stop scoring the 1-cycle bounce) ----
+def test_horizon_gating_defers_then_finalizes(tmp_path):
+    # a flat decided at cycle 9 is NOT finalized 1 cycle later; only after the multi-day horizon
+    append_flat_decision(tmp_path, _flat("XLMUSDT", side="short", mark=100.0, cycle=9),
+                         ts=datetime(2026, 5, 31, tzinfo=UTC))
+    n1 = evaluate_pending_flats(tmp_path, {"XLMUSDT": 98.0}, datetime(2026, 5, 31, 4, tzinfo=UTC),
+                                now_cycle=10, eval_after_cycles=6)
+    assert n1 == 0 and read_flat_decisions(tmp_path)[0]["evaluated"] is False  # deferred
+    n2 = evaluate_pending_flats(tmp_path, {"XLMUSDT": 90.0}, datetime(2026, 6, 1, 4, tzinfo=UTC),
+                                now_cycle=15, eval_after_cycles=6)
+    assert n2 == 1 and read_flat_decisions(tmp_path)[0]["evaluated"] is True
+
+
+def test_uses_max_favorable_excursion_not_endpoint(tmp_path):
+    # declined SHORT at 100: trends our way to 80 (+20%) mid-window, then round-trips to 98 (+2%) at
+    # the horizon. Verdict must reflect the +20% the trade would have captured (TPs), not the +2%.
+    append_flat_decision(tmp_path, _flat("ETHUSDT", side="short", mark=100.0, cycle=9),
+                         ts=datetime(2026, 5, 31, tzinfo=UTC))
+    evaluate_pending_flats(tmp_path, {"ETHUSDT": 80.0}, datetime(2026, 5, 31, 8, tzinfo=UTC),
+                           now_cycle=11, eval_after_cycles=6)   # mid-window peak, still pending
+    assert read_flat_decisions(tmp_path)[0]["evaluated"] is False
+    evaluate_pending_flats(tmp_path, {"ETHUSDT": 98.0}, datetime(2026, 6, 1, 4, tzinfo=UTC),
+                           now_cycle=15, eval_after_cycles=6)   # round-trip endpoint, finalize
+    r = read_flat_decisions(tmp_path)[0]
+    assert r["evaluated"] is True and r["flat_cost_us"] is True
+    assert abs(r["favored_move_pct"] - 0.20) < 1e-9    # MAX excursion, not the 0.02 endpoint
+    assert abs(r["endpoint_move_pct"] - 0.02) < 1e-9   # endpoint recorded for transparency
+
+
+def test_short_horizon_bounce_no_longer_locks_verdict(tmp_path):
+    # the bug: a declined SHORT that bounces +2% (against) next candle USED to lock cost_us=False.
+    # now the bounce is deferred (not finalized), and the later trend decides the verdict.
+    append_flat_decision(tmp_path, _flat("ADAUSDT", side="short", mark=100.0, cycle=9),
+                         ts=datetime(2026, 5, 31, tzinfo=UTC))
+    evaluate_pending_flats(tmp_path, {"ADAUSDT": 102.0}, datetime(2026, 5, 31, 4, tzinfo=UTC),
+                           now_cycle=10, eval_after_cycles=6)   # +2% against -> NOT locked
+    assert read_flat_decisions(tmp_path)[0]["evaluated"] is False
+    evaluate_pending_flats(tmp_path, {"ADAUSDT": 85.0}, datetime(2026, 6, 1, 4, tzinfo=UTC),
+                           now_cycle=15, eval_after_cycles=6)   # trend down 15% -> cost us
+    r = read_flat_decisions(tmp_path)[0]
+    assert r["evaluated"] is True and r["flat_cost_us"] is True
