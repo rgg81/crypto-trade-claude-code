@@ -497,3 +497,46 @@ def test_gate_stamps_anchor_swing_on_counter_regime_conversion(tmp_path):
     assert len(stored) == 1 and stored[0].kind == "stop_entry"
     assert stored[0].anchor_swing is not None
     assert stored[0].anchor_swing < last - 10        # short anchored to swing_low (uptrend ~131)
+
+
+# ---- Pillar 4 AUDIT: anti-hallucination — a fabricated entry/atr is dropped before the gate ----
+
+def test_gate_audit_drops_fabricated_market_entry(tmp_path):
+    state_dir, memory_dir = tmp_path / "s", tmp_path / "m"
+    ex = FakeExchange({"BTC/USDT:USDT": _uptrend()})
+    last = _pf(state_dir, memory_dir, ex)["briefs"][0]["last_close"]
+    gt = {"BTCUSDT": {"mark": last, "atr": 2.0}}
+    # a LONG market proposal whose entry is 50% above the brief mark = a fantasy fill -> dropped
+    fab = AgentProposal(symbol="BTCUSDT", direction="long", entry=last * 1.5, stop=last * 1.4,
+                        take_profits=[last * 1.8], atr=2.0, confidence=0.7,
+                        rationale="x").model_dump()
+    report = gate_execute_step(ex, _settings(), state_dir, memory_dir, now=NOW, cycle_no=1,
+                               proposals=[fab], regime_state=_regime("risk_on"), ground_truth=gt)
+    assert report["audit_dropped"] == 1 and report["opened"] == 0
+    assert any("AUDIT dropped" in w for w in report.get("warnings", []))
+
+
+def test_gate_audit_keeps_clean_proposal(tmp_path):
+    state_dir, memory_dir = tmp_path / "s", tmp_path / "m"
+    ex = FakeExchange({"BTC/USDT:USDT": _uptrend()})
+    last = _pf(state_dir, memory_dir, ex)["briefs"][0]["last_close"]
+    gt = {"BTCUSDT": {"mark": last, "atr": 2.0}}
+    clean = AgentProposal(symbol="BTCUSDT", direction="long", entry=last, stop=last - 4.0,
+                          take_profits=[last + 9.0], atr=2.0, confidence=0.7,
+                          rationale="x").model_dump()
+    report = gate_execute_step(ex, _settings(), state_dir, memory_dir, now=NOW, cycle_no=1,
+                               proposals=[clean], regime_state=_regime("risk_on"), ground_truth=gt)
+    assert report["audit_dropped"] == 0
+
+
+def test_gate_audit_failopen_without_ground_truth(tmp_path):
+    # no ground_truth passed -> audit is inert (fail-open), proposal flows to the gate as before
+    state_dir, memory_dir = tmp_path / "s", tmp_path / "m"
+    ex = FakeExchange({"BTC/USDT:USDT": _uptrend()})
+    last = _pf(state_dir, memory_dir, ex)["briefs"][0]["last_close"]
+    clean = AgentProposal(symbol="BTCUSDT", direction="long", entry=last, stop=last - 4.0,
+                          take_profits=[last + 9.0], atr=2.0, confidence=0.7,
+                          rationale="x").model_dump()
+    report = gate_execute_step(ex, _settings(), state_dir, memory_dir, now=NOW, cycle_no=1,
+                               proposals=[clean], regime_state=_regime("risk_on"))
+    assert report["audit_dropped"] == 0

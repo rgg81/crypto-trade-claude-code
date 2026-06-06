@@ -50,8 +50,16 @@ def main() -> None:
     # confirmation trigger — a never-read tape can never open a naked position (mirror-symmetric).
     _DEGRADED = {"regime": "mixed", "confirmed": False,
                  "drivers": {"quorum_met": False, "degraded": ["context_missing"]}}
+    # Pillar 4 AUDIT — build the anti-hallucination ground truth {raw symbol: {mark, atr}} from the
+    # context briefs so the gate can drop any proposal/trigger whose entry/atr was fabricated.
+    ground_truth: dict = {}
     try:
-        regime_state = load_output("state", args.cycle, "context").get("regime_state") or _DEGRADED
+        _ctx = load_output("state", args.cycle, "context")
+        regime_state = _ctx.get("regime_state") or _DEGRADED
+        for b in _ctx.get("briefs", []):
+            sym = b.get("exchange_id")
+            if sym:
+                ground_truth[sym] = {"mark": b.get("last_close"), "atr": b.get("atr")}
     except FileNotFoundError:
         print("WARNING: context.json missing — regime UNREAD; fail-closed (both directions must "
               "confirm via trigger, no naked market entry).", file=sys.stderr)
@@ -88,7 +96,7 @@ def main() -> None:
                                now=now, cycle_no=args.cycle,
                                proposals=payload.get("proposals", []),
                                management=management, regime_state=regime_state, triggers=triggers,
-                               cancel_triggers=cancel_triggers)
+                               cancel_triggers=cancel_triggers, ground_truth=ground_truth)
     # Run-markers consumed by scripts/due_check.py (hourly-poll candle gate). candle = the 4h
     # candle this cycle served (floor of the gate-start), ran_at = audit/clock-skew sentinel.
     report["ran_at"] = now.isoformat()

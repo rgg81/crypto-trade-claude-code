@@ -536,7 +536,8 @@ def gate_execute_step(exchange, settings: Settings, state_dir, memory_dir,
                       management: list[dict] | None = None,
                       regime_state: dict | None = None,
                       triggers: list[dict] | None = None,
-                      cancel_triggers: list[dict] | None = None) -> dict:
+                      cancel_triggers: list[dict] | None = None,
+                      ground_truth: dict | None = None) -> dict:
     """Phases 7-10: normalize proposal symbols (accept unified OR raw), convert to TradeProposals
     (inject funding), run the A1 gate + A3b execution via execute_proposals, persist. An
     unrecognized symbol is COUNTED in report['dropped'], never silently vanished.
@@ -555,6 +556,18 @@ def gate_execute_step(exchange, settings: Settings, state_dir, memory_dir,
         upsert_triggers,
     )
     from futures_fund.state import is_halted
+
+    # Pillar 4 AUDIT — anti-hallucination: drop any proposal/trigger whose entry/atr diverges too
+    # far from the brief ground truth it was derived from (fabricated entry = a fantasy paper fill;
+    # a fabricated atr = mis-sized risk), BEFORE the gate. Fail-open on missing ground truth so it
+    # never becomes a deploy-blocker; adds a check, weakens nothing. Symmetric long/short.
+    audit_dropped: list[dict] = []
+    if ground_truth:
+        from futures_fund.proposal_audit import audit_batch
+        proposals, _dp = audit_batch(list(proposals or []), ground_truth, is_trigger=False)
+        triggers, _dt = audit_batch(list(triggers or []), ground_truth, is_trigger=True)
+        audit_dropped = _dp + _dt
+
     account = load_account(state_dir, settings.account_size_usdt)
     positions = load_positions(state_dir)
     pending = load_pending_orders(state_dir)
@@ -770,6 +783,10 @@ def gate_execute_step(exchange, settings: Settings, state_dir, memory_dir,
                                prediction_by_symbol=prediction_by_symbol,
                                close_absent=not has_review, force_close=force_close)
     report["dropped"] = dropped
+    report["audit_dropped"] = len(audit_dropped)  # anti-hallucination drops (Pillar 4)
+    if audit_dropped:
+        report.setdefault("warnings", []).extend(
+            f"AUDIT dropped {d.get('symbol')} ({d.get('_audit_reason')})" for d in audit_dropped)
     report["trailed"] = trailed
     report["halted"] = halted  # closed_by_review is set by execute_proposals (actual, not intent)
     report["reduced"] = reduced
