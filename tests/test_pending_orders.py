@@ -4,9 +4,11 @@ import json
 
 from futures_fund.pending_orders import (
     PendingOrder,
+    _stale_geometry,
     check_pending_orders,
     fired_to_proposal,
     load_pending_orders,
+    revalidate_triggers,
     save_pending_orders,
     upsert_triggers,
 )
@@ -238,3 +240,101 @@ def test_counter_regime_trigger_preserves_require_oi_rising():
         {"symbol": "BTCUSDT", "direction": "long", "entry": 64800.0, "stop": 60800.0,
          "take_profits": [70000.0], "atr": 1652.0}, cycle_no=5)
     assert po2.require_oi_rising is False
+
+
+# ---- Stale-trigger geometry revalidation: a stop_entry whose swing anchor CROSSED PAST its level
+# since arming (the cy43 ETH inversion) must be judged STALE -> auto-canceled. Symmetric, fail-safe.
+# Only a trigger that recorded its arm-time anchor (a real breakdown/breakout level) is checked --
+
+def _staleable(symbol="ETHUSDT", direction="short", trigger=1532.0, stop=1576.0, atr=64.1,
+               anchor=1538.0, kind="stop_entry"):
+    # a stop_entry armed as a genuine swing anchor: short anchored at/above its level (breakdown),
+    # long at/below (breakout). anchor = the directional swing captured at ARM time.
+    o = _o(symbol=symbol, direction=direction, kind=kind, trigger=trigger, stop=stop)
+    return o.model_copy(update={"atr": atr, "anchor_swing": anchor})
+
+
+def test_stale_geometry_cy43_eth_short_is_stale():
+    # REAL cy43 numbers: armed cy42 with swing_low 1538 (>= trigger 1532), atr 64.1. By cy43 the
+    # swing_low FELL to 1503.6 (< trigger): support crossed below the breakdown level -> would now
+    # fire mid-bounce, not on a new low -> STALE.
+    o = _staleable(trigger=1532.0, anchor=1538.0, atr=64.1)
+    assert _stale_geometry(o, swing_high=1892.39, swing_low=1503.6) is True
+
+
+def test_stale_geometry_short_healthy_when_support_has_not_crossed():
+    # support still at/above the breakdown level (1538 ~ unchanged) -> a clean live trigger -> keep
+    o = _staleable(trigger=1532.0, anchor=1538.0, atr=64.1)
+    assert _stale_geometry(o, swing_high=1892.39, swing_low=1538.0) is False
+
+
+def test_stale_geometry_unstamped_trigger_never_stale():
+    # the OI-gate / legacy / non-swing-anchored case: no anchor_swing recorded -> NEVER revalidated,
+    # even when the current swing_low sits far below the level (prevents canceling valid trades).
+    o = _o(symbol="ETHUSDT", direction="short", trigger=1532.0, stop=1576.0)  # anchor_swing=None
+    o = o.model_copy(update={"atr": 64.1})
+    assert o.anchor_swing is None
+    assert _stale_geometry(o, swing_high=1892.39, swing_low=1200.0) is False
+
+
+def test_stale_geometry_long_mirror_is_stale():
+    # breakout LONG armed with swing_high 1900 (<= trigger 1900); resistance ROSE to 1990 (atr 60,
+    # buffer 15) -> 1990 > 1900+15 -> resistance crossed above the breakout level -> stale (mirror).
+    o = _staleable(direction="long", trigger=1900.0, stop=1820.0, atr=60.0, anchor=1900.0)
+    assert _stale_geometry(o, swing_high=1990.0, swing_low=1500.0) is True
+
+
+def test_stale_geometry_long_healthy_when_resistance_has_not_crossed():
+    o = _staleable(direction="long", trigger=1900.0, stop=1820.0, atr=60.0, anchor=1900.0)
+    assert _stale_geometry(o, swing_high=1880.0, swing_low=1500.0) is False
+
+
+def test_stale_geometry_within_buffer_wobble_not_stale():
+    # short trigger 1532, atr 64.1 -> buffer = 0.25*64.1 = 16.03, line = 1515.97. swing_low 1520 is
+    # still ABOVE the line -> a noise wobble, NOT a confirmed crossing -> NOT stale.
+    o = _staleable(trigger=1532.0, anchor=1538.0, atr=64.1)
+    assert _stale_geometry(o, swing_high=1892.39, swing_low=1520.0) is False
+
+
+def test_stale_geometry_limit_entry_never_stale():
+    # limit_entry is a pullback TOUCH (opposite geometry) -> this pass never judges it stale
+    o = _staleable(kind="limit_entry", trigger=1532.0, anchor=1538.0, atr=64.1)
+    assert _stale_geometry(o, swing_high=1892.39, swing_low=1400.0) is False
+
+
+def test_stale_geometry_failsafe_missing_or_nonfinite_inputs():
+    o = _staleable(trigger=1532.0, anchor=1538.0, atr=64.1)
+    assert _stale_geometry(o, swing_high=1892.39, swing_low=None) is False     # missing swing
+    assert _stale_geometry(o, swing_high=1892.39, swing_low=float("nan")) is False
+    assert _stale_geometry(o, swing_high=1892.39, swing_low=float("-inf")) is False
+    bad = o.model_copy(update={"trigger_level": float("nan")})
+    assert _stale_geometry(bad, swing_high=1892.39, swing_low=1503.6) is False  # bad level
+    bad_anchor = o.model_copy(update={"anchor_swing": float("inf")})
+    assert _stale_geometry(bad_anchor, swing_high=1892.39, swing_low=1503.6) is False
+
+
+def test_stale_geometry_pct_floor_when_atr_zero():
+    # atr 0 -> buffer falls back to 0.25% of level (1532*0.0025 = 3.83), line = 1528.17. swing_low
+    # 1525 is below the line -> stale; swing_low 1530 (above the line) -> not stale.
+    o = _staleable(trigger=1532.0, anchor=1538.0, atr=0.0)
+    assert _stale_geometry(o, swing_high=1892.39, swing_low=1525.0) is True
+    assert _stale_geometry(o, swing_high=1892.39, swing_low=1530.0) is False
+
+
+def test_stale_geometry_tighter_level_short_not_flagged():
+    # a short deliberately placed ABOVE the 20-bar support (trigger 144, support 131 at arm) was
+    # NEVER a breakdown-of-the-swing anchor: anchor 131 < line(143.5) -> not stale even though the
+    # current swing_low (120) sits below the level. Protects valid tighter-level entries.
+    o = _staleable(symbol="XRPUSDT", trigger=144.0, stop=150.0, atr=2.0, anchor=131.0)
+    assert _stale_geometry(o, swing_high=200.0, swing_low=120.0) is False
+
+
+def test_revalidate_triggers_partitions_stale_and_healthy():
+    stale_short = _staleable(symbol="ETHUSDT", trigger=1532.0, anchor=1538.0, atr=64.1)
+    healthy_short = _staleable(symbol="BTCUSDT", trigger=60000.0, stop=62000.0, atr=800.0,
+                               anchor=60500.0)
+    no_swing = _staleable(symbol="SOLUSDT", trigger=60.0, stop=62.0, atr=2.0, anchor=60.5)
+    swings = {"ETHUSDT": (1892.39, 1503.6), "BTCUSDT": (66000.0, 61000.0)}  # SOL absent (feed gap)
+    stale, healthy = revalidate_triggers([stale_short, healthy_short, no_swing], swings)
+    assert [o.symbol for o in stale] == ["ETHUSDT"]
+    assert {o.symbol for o in healthy} == {"BTCUSDT", "SOLUSDT"}  # no-swing kept (fail-safe)

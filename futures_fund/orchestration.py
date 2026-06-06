@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
+from futures_fund.baseline import swing_levels
 from futures_fund.brief import build_symbol_brief, last_completed_frame, oi_change_for
 from futures_fund.config import Settings
 from futures_fund.contracts import to_trade_proposal
@@ -412,6 +413,21 @@ def _proposal_to_stop_entry(p: dict, cycle_no: int):
         created_cycle=cycle_no, expires_cycle=cycle_no + 2)
 
 
+def _stamp_anchor_swing(po, swings_by_symbol: dict):
+    """Stamp a breakout/breakdown stop_entry's ARM-TIME directional swing (swing_low for a short,
+    swing_high for a long) so a later cycle can auto-cancel it once the swing crosses past it.
+    Applied identically to BOTH provenances — Trader-emitted triggers AND counter-regime safety
+    conversions — so neither is left silently un-revalidatable (no provenance gap, no long/short
+    bias). No-op for a non-stop_entry, already-stamped order, or absent swing -> left unstamped
+    (None) -> never auto-revalidated (fail-safe)."""
+    if po.kind != "stop_entry" or po.anchor_swing is not None:
+        return po
+    sw = swings_by_symbol.get(po.symbol)
+    if sw is None:
+        return po
+    return po.model_copy(update={"anchor_swing": sw[1] if po.direction == "short" else sw[0]})
+
+
 def _apply_counter_regime_confirmation(proposals: list[dict], regime_state, cycle_no: int):
     """SYMMETRIC entry-style gate (replaces the one-sided shorts drop-filter). Permission is never
     blocked; a COUNTER-regime fresh market proposal is rewritten into a confirmation stop_entry
@@ -513,6 +529,7 @@ def gate_execute_step(exchange, settings: Settings, state_dir, memory_dir,
         check_pending_orders,
         fired_to_proposal,
         load_pending_orders,
+        revalidate_triggers,
         save_pending_orders,
         upsert_triggers,
     )
@@ -618,6 +635,11 @@ def gate_execute_step(exchange, settings: Settings, state_dir, memory_dir,
     oi_gate_syms = {o.symbol for o in pending if getattr(o, "require_oi_rising", False)}
     bars_by_symbol: dict = {}
     oi_change_by_symbol: dict = {}
+    # Current swing hi/lo per symbol (same swing_levels the brief feeds the team) — used both for
+    # a newly-armed stop_entry's arm-time anchor AND to revalidate prior-armed ones for a swing that
+    # has crossed PAST its level (the cy43 ETH inversion). Computed over completed bars (forming row
+    # already dropped). A feed gap -> no entry -> fail-safe (no stamp, no auto-cancel).
+    swings_by_symbol: dict = {}
     for raw, uni in ctx.raw_to_unified.items():
         # A stop_entry/limit_entry must fire off the latest COMPLETED 4h bar — NOT the still-forming
         # candle the OHLCV feed returns as iloc[-1] (its transient close flips on every tick). Drop
@@ -633,9 +655,36 @@ def gate_execute_step(exchange, settings: Settings, state_dir, memory_dir,
             pass
         if raw in oi_gate_syms:   # completed-bar OI aligned to the same `now` the bar was read at
             oi_change_by_symbol[raw] = oi_change_for(exchange, uni, settings.timeframe, now)
+        try:
+            sh, sl = swing_levels(df)
+            swings_by_symbol[raw] = (float(sh), float(sl))
+        except Exception:  # noqa: BLE001 — feed gap -> no swing entry -> fail-safe (Rule 4)
+            pass
     fired, expired, remaining = check_pending_orders(state_dir, bars_by_symbol, cycle_no,
                                                      held_symbols=held_symbols,
                                                      oi_change_by_symbol=oi_change_by_symbol)
+
+    # AUTO-REVALIDATE armed stop_entry geometry: a trigger whose swing anchor crossed PAST its level
+    # since it was armed (swing_low fell below a breakdown short, or swing_high rose over a breakout
+    # long) would now fire MID-BOUNCE, not on a fresh break (the cy43 ETH case the RM caught by eye)
+    # Auto-cancel it through the SAME flow as an explicit cancel — dropped from fired (never opened)
+    # AND from remaining (not persisted) — so the team re-arms at the true level next cycle via the
+    # flow (Rule 1, never a manual store edit). Only PRIOR-armed triggers are checked; this cycle's
+    # new_triggers are placed against this swing and are fresh by construction. Symmetric+fail-safe.
+    stale_orders, _ = revalidate_triggers(fired + remaining, swings_by_symbol)
+    stale_ids = {o.id for o in stale_orders}
+    stale_actions = []
+    if stale_ids:
+        fired = [o for o in fired if o.id not in stale_ids]
+        remaining = [o for o in remaining if o.id not in stale_ids]
+        for o in stale_orders:
+            sh, sl = swings_by_symbol.get(o.symbol, (None, None))
+            anchor = sl if o.direction == "short" else sh
+            anchor_kind = "support" if o.direction == "short" else "resistance"
+            stale_actions.append(
+                f"auto-canceled STALE {o.direction} {o.kind} {o.symbol} @ {o.trigger_level} — "
+                f"swing {anchor_kind} crossed to {anchor} (trigger stranded on the wrong side); "
+                f"re-arm at the true level if still valid")
 
     # --- Explicit cancellation: the Trader/RM may RETIRE an armed trigger whose thesis decayed, via
     # the normal proposals flow (`cancel_triggers`), so the TEAM cancels — not a manual store edit.
@@ -717,7 +766,9 @@ def gate_execute_step(exchange, settings: Settings, state_dir, memory_dir,
     # PROTECT the cr_armed keys: upsert_triggers replaces by (symbol, direction, kind), so a Trader
     # trigger sharing a key would silently clobber the auto-armed counter-regime SAFETY trigger.
     # The safety conversion wins; a colliding Trader trigger is skipped (counted as armed_collisions).
-    new_triggers = list(cr_armed)
+    # Stamp the counter-regime SAFETY conversions too (same helper as Trader triggers) so a drifted
+    # cr-safety trigger is auto-revalidatable in a later cycle — no provenance coverage gap.
+    new_triggers = [_stamp_anchor_swing(po, swings_by_symbol) for po in cr_armed]
     cr_keys = {(o.symbol, o.direction, o.kind) for o in cr_armed}
     armed_collisions = 0
     if not halted:
@@ -726,7 +777,7 @@ def gate_execute_step(exchange, settings: Settings, state_dir, memory_dir,
             try:
                 fields = {**t, "created_cycle": cycle_no,
                           "expires_cycle": int(t.get("expires_cycle", cycle_no + 3))}
-                po = PendingOrder.model_validate(fields)
+                po = _stamp_anchor_swing(PendingOrder.model_validate(fields), swings_by_symbol)
                 if (po.symbol, po.direction, po.kind) in cr_keys:
                     armed_collisions += 1
                     continue  # don't clobber the counter-regime safety trigger
@@ -751,6 +802,10 @@ def gate_execute_step(exchange, settings: Settings, state_dir, memory_dir,
     report["triggers_remaining"] = len(remaining)
     report["triggers_armed"] = len(new_triggers)
     report["triggers_canceled"] = n_canceled
+    report["auto_canceled_stale"] = len(stale_ids)  # geometry-inverted triggers retired this cycle
+    if stale_actions:                                # surface each so the team can re-arm (Rule 6)
+        report.setdefault("actions", []).extend(stale_actions)
+        report.setdefault("warnings", []).extend(stale_actions)
     # symmetric telemetry replacing dropped_short_regime: how many fresh entries went to market vs
     # were converted to a counter-regime confirmation trigger (operator can see the routing split).
     report["market_entries"] = len(market_fresh)

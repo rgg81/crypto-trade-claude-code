@@ -22,6 +22,15 @@ from pydantic import BaseModel, Field
 # deadband. +0.5% (not strict >0) so flat/noise OI does NOT count as 'rising' fuel.
 OI_RISING_EPS = 0.005
 
+# Stale-trigger geometry deadband. A stop_entry's swing anchor (swing_low for a breakdown short,
+# swing_high for a breakout long) must move PAST its trigger_level by more than `buffer` before the
+# trigger is judged geometrically STALE, where buffer = max(ATR_FRAC * atr, PCT_FALLBACK * |level|).
+# 0.25 grounded in the cy43 ETH inversion (the swing crossed the level by 0.44*ATR there, so 0.25
+# catches it with margin while staying well above tick wobble; 0.5 would have MISSED it). The pct
+# floor gives a finite deadband when atr is missing/zero. Symmetric across long/short.
+STALE_TRIGGER_ATR_FRAC = 0.25
+STALE_TRIGGER_PCT_FALLBACK = 0.0025
+
 
 class PendingOrder(BaseModel):
     id: str = Field(default_factory=lambda: uuid.uuid4().hex)
@@ -41,6 +50,11 @@ class PendingOrder(BaseModel):
     # HOLDS the trigger armed. Default False = today's behavior (OI never consulted). Symmetric:
     # applied identically to a flush-SHORT down-break and a squeeze-LONG up-break.
     require_oi_rising: bool = False
+    # The directional swing captured at ARM time (swing_low for a short breakdown, swing_high for a
+    # long breakout), so a later cycle can detect the swing crossing PAST this level and auto-cancel
+    # the stale trigger. None = unstamped (legacy / non-breakdown trigger) -> NEVER auto-revalidated
+    # (fail-safe; auto-cancel only ever acts on a confirmed arm->now crossing of a real anchor).
+    anchor_swing: float | None = None
     created_cycle: int = 0
     expires_cycle: int = 0
 
@@ -113,6 +127,49 @@ def _oi_confirms(oi_change_by_symbol, symbol: str) -> bool:
     long and short, so the OI-gate cannot introduce a long/short bias (market-neutral mandate)."""
     oi = (oi_change_by_symbol or {}).get(symbol)
     return oi is not None and not math.isnan(oi) and oi > OI_RISING_EPS
+
+
+def _stale_geometry(o: PendingOrder, swing_high, swing_low) -> bool:
+    """True iff a stop_entry trigger's swing anchor has CROSSED PAST its level since it was armed
+    (the cy43 ETH inversion): a breakdown SHORT must fire at/below support, so it is STALE once the
+    swing_low — which was at/above the level at arm — falls below it; a breakout LONG is STALE once
+    the swing_high — at/below the level at arm — rises above it. Crossing is judged against a single
+    deadband line L (trigger_level −/+ buffer) so a within-noise wobble does NOT trip it.
+
+    Symmetric. ONLY a stop_entry with a recorded `anchor_swing` is revalidated: a limit_entry
+    (pullback TOUCH, opposite geometry), a non-long/short order, or any UNSTAMPED trigger (legacy,
+    or placed away from the 20-bar swing) is NEVER judged stale — so auto-cancel can only
+    retire a trigger that was a genuine swing breakout/breakdown anchor and has since been crossed.
+    FAIL-SAFE: a missing / non-finite (None/NaN/inf) anchor, current swing, or trigger_level -> NOT
+    stale (keep the trigger armed)."""
+    if o.kind != "stop_entry" or o.direction not in ("long", "short"):
+        return False
+    lvl, anchor0 = o.trigger_level, o.anchor_swing
+    if lvl is None or not math.isfinite(lvl) or anchor0 is None or not math.isfinite(anchor0):
+        return False
+    now_swing = swing_low if o.direction == "short" else swing_high
+    if now_swing is None or not math.isfinite(now_swing):
+        return False
+    atr = o.atr if (o.atr and math.isfinite(o.atr)) else 0.0
+    buffer = max(atr * STALE_TRIGGER_ATR_FRAC, abs(lvl) * STALE_TRIGGER_PCT_FALLBACK)
+    if o.direction == "short":            # support crossed the L line downward (arm >= L, now < L)
+        line = lvl - buffer
+        return anchor0 >= line and now_swing < line
+    line = lvl + buffer                   # resistance crossed the L line upward (arm <= L, now > L)
+    return anchor0 <= line and now_swing > line
+
+
+def revalidate_triggers(orders: list[PendingOrder],
+                        swings_by_symbol: dict) -> tuple[list, list]:
+    """Partition armed orders into (stale, healthy) by stop_entry swing geometry. `swings_by_symbol`
+    maps RAW symbol -> (swing_high, swing_low). A symbol with NO swing entry (feed gap) is FAIL-SAFE
+    kept (healthy). Pure — the caller cancels the stale set through the normal cancel flow (never a
+    manual store edit), so a geometrically-inverted trigger neither fires nor persists."""
+    stale, healthy = [], []
+    for o in orders:
+        sh, sl = (swings_by_symbol or {}).get(o.symbol, (None, None))
+        (stale if _stale_geometry(o, sh, sl) else healthy).append(o)
+    return stale, healthy
 
 
 def check_pending_orders(state_dir, bars_by_symbol: dict, cycle_no: int,

@@ -409,3 +409,91 @@ def test_gate_fetches_oi_only_for_opted_in_symbol(tmp_path):
     gate_execute_step(ex, _settings(), state_dir, memory_dir, now=NOW, cycle_no=1,
                       proposals=[], regime_state=_regime("risk_off"))
     assert _CountingEx.oi_calls >= 1
+
+
+# ---- Stale-trigger auto-revalidation: a prior-armed stop_entry whose swing crossed PAST its level
+# is auto-canceled through the gate (never opened, never persisted) — symmetric+fail-safe+reported.
+
+def _armed(direction, trigger, stop, tps, atr=2.0, anchor=None, kind="stop_entry"):
+    return PendingOrder(symbol="BTCUSDT", direction=direction, kind=kind, trigger_level=trigger,
+                        stop=stop, take_profits=tps, atr=atr, anchor_swing=anchor,
+                        created_cycle=0, expires_cycle=9)
+
+
+def test_gate_auto_cancels_stale_short_even_when_it_would_fire(tmp_path):
+    # short armed as a breakdown (anchor above the level); the 20-bar swing_low has since fallen far
+    # below it (uptrend swing_low ~131). The bar CLOSE is below the level (it WOULD fire) — but is
+    # geometrically stale, so it is dropped from `fired` (never opened) AND from the store.
+    state_dir, memory_dir = tmp_path / "s", tmp_path / "m"
+    ex = FakeExchange({"BTC/USDT:USDT": _uptrend()})
+    last = _pf(state_dir, memory_dir, ex)["briefs"][0]["last_close"]
+    save_pending_orders(state_dir, [_armed("short", trigger=last + 4.0, stop=last + 12.0,
+                                           tps=[last - 20.0], anchor=last + 8.0)])
+    report = gate_execute_step(ex, _settings(), state_dir, memory_dir, now=NOW, cycle_no=1,
+                               proposals=[], regime_state=_regime("risk_off"))
+    assert report["auto_canceled_stale"] == 1
+    assert report["triggers_fired"] == 0 and report["opened"] == 0
+    assert load_pending_orders(state_dir) == []          # not persisted -> team re-arms next cycle
+    assert any("auto-canceled STALE" in a for a in report.get("warnings", []))
+
+
+def test_gate_auto_cancels_stale_long_mirror(tmp_path):
+    # symmetric mirror: long breakout armed below resistance; the 20-bar swing_high has since risen
+    # ABOVE the level -> resistance crossed up -> auto-cancel (no long/short asymmetry).
+    state_dir, memory_dir = tmp_path / "s", tmp_path / "m"
+    ex = FakeExchange({"BTC/USDT:USDT": _uptrend()})
+    last = _pf(state_dir, memory_dir, ex)["briefs"][0]["last_close"]
+    save_pending_orders(state_dir, [_armed("long", trigger=last - 10.0, stop=last - 20.0,
+                                           tps=[last + 30.0], anchor=last - 12.0)])
+    report = gate_execute_step(ex, _settings(), state_dir, memory_dir, now=NOW, cycle_no=1,
+                               proposals=[], regime_state=_regime("risk_on"))
+    assert report["auto_canceled_stale"] == 1 and report["opened"] == 0
+    assert load_pending_orders(state_dir) == []
+
+
+def test_gate_keeps_unstamped_trigger_and_does_not_autocancel(tmp_path):
+    # an UNSTAMPED prior trigger (no arm-time anchor) is never auto-canceled, even with swing_low
+    # below it: a non-firing short stays armed (proves stamping is REQUIRED to retire a trigger).
+    state_dir, memory_dir = tmp_path / "s", tmp_path / "m"
+    ex = FakeExchange({"BTC/USDT:USDT": _uptrend()})
+    last = _pf(state_dir, memory_dir, ex)["briefs"][0]["last_close"]
+    save_pending_orders(state_dir, [_armed("short", trigger=last - 25.0, stop=last - 15.0,
+                                           tps=[last - 40.0], anchor=None)])   # unstamped
+    report = gate_execute_step(ex, _settings(), state_dir, memory_dir, now=NOW, cycle_no=1,
+                               proposals=[], regime_state=_regime("risk_off"))
+    assert report["auto_canceled_stale"] == 0 and report["triggers_remaining"] == 1
+
+
+def test_gate_stamps_anchor_swing_on_new_stop_entry(tmp_path):
+    # self-priming: a freshly-armed Trader stop_entry is stamped with the current directional swing
+    # (short -> swing_low) so it can be revalidated in a LATER cycle; it is NOT canceled this cycle.
+    state_dir, memory_dir = tmp_path / "s", tmp_path / "m"
+    ex = FakeExchange({"BTC/USDT:USDT": _uptrend()})
+    last = _pf(state_dir, memory_dir, ex)["briefs"][0]["last_close"]
+    report = gate_execute_step(
+        ex, _settings(), state_dir, memory_dir, now=NOW, cycle_no=1, proposals=[],
+        regime_state=_regime("risk_off"),
+        triggers=[{"symbol": "BTCUSDT", "direction": "short", "kind": "stop_entry",
+                   "trigger_level": last - 25.0, "stop": last - 15.0,
+                   "take_profits": [last - 40.0], "atr": 2.0}])
+    stored = load_pending_orders(state_dir)
+    assert len(stored) == 1 and stored[0].anchor_swing is not None
+    assert stored[0].anchor_swing < last - 10        # short anchored to swing_low (uptrend ~131)
+    assert report["auto_canceled_stale"] == 0        # a freshly-armed trigger is never revalidated
+
+
+def test_gate_stamps_anchor_swing_on_counter_regime_conversion(tmp_path):
+    # PROVENANCE PARITY: a counter-regime short -> confirmation stop_entry must ALSO be stamped with
+    # the arm-time swing (short -> swing_low), so a cr-safety trigger is auto-revalidatable next
+    # cycle just like a Trader-emitted one. The stale GEOMETRY itself is covered by the unit tests;
+    # this only proves the cr_armed provenance is no longer silently skipped.
+    state_dir, memory_dir = tmp_path / "s", tmp_path / "m"
+    ex = FakeExchange({"BTC/USDT:USDT": _uptrend()})
+    last = _pf(state_dir, memory_dir, ex)["briefs"][0]["last_close"]
+    report = gate_execute_step(ex, _settings(), state_dir, memory_dir, now=NOW, cycle_no=1,
+                               proposals=[_short(last)], regime_state=_regime("risk_on"))
+    assert report["counter_regime_triggered"] == 1 and report["auto_canceled_stale"] == 0
+    stored = load_pending_orders(state_dir)
+    assert len(stored) == 1 and stored[0].kind == "stop_entry"
+    assert stored[0].anchor_swing is not None
+    assert stored[0].anchor_swing < last - 10        # short anchored to swing_low (uptrend ~131)
