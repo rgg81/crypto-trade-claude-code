@@ -26,9 +26,12 @@ def open_heat(positions: list[Position], equity: float) -> float:
     return sum(position_risk(p.qty, p.entry, p.stop, equity, p.direction) for p in positions)
 
 
-# Soft dollar-neutral exposure (market-neutral mandate). The book is steered toward gross-long $ ~=
-# gross-short $; a tilt past this fraction of gross is nagged SYMMETRICALLY (no hard veto).
-_TILT_WARN = 0.30  # |net| / gross > 0.30  <=>  one side > ~65% of gross exposure
+# ALL-WEATHER exposure signal (Pillar 2). The desk's mandate is PROFIT IN ALL CONDITIONS, NOT
+# dollar-neutral-always: net exposure is a MANAGED RISK PARAMETER, not a forced zero. This is a SOFT
+# diversification nudge — when the book gets materially one-sided in risk-bearing legs, it suggests
+# adding a quality OTHER-side setup IF one exists, to reduce concentration. It is NEVER a reason to
+# stand flat: a single regime-aligned position with no available hedge is valid and expected.
+_TILT_WARN = 0.30  # |net| / gross > 0.30  <=>  one side > ~65% of risk-bearing gross exposure
 
 
 def _is_risk_bearing(p: Position) -> bool:
@@ -91,9 +94,11 @@ def exposure_warning(exposure: dict, tilt_warn: float = _TILT_WARN) -> str | Non
     net_pct = exposure.get("net_rb_pct_equity", exposure.get("net_pct_equity", 0.0))
     if long_share >= 0.5:  # net-long among risk-bearing legs
         return (f"book is net-LONG at risk ({long_share:.0%} of risk-bearing gross is long, net "
-                f"{net_pct:+.0%} of equity) — MARKET-NEUTRAL mandate: prefer SHORT setups to rebalance")
+                f"{net_pct:+.0%} of equity) — diversification: add a quality SHORT setup IF one "
+                f"exists to cut concentration; a solo regime-aligned long is valid (not a flat)")
     return (f"book is net-SHORT at risk ({1 - long_share:.0%} of risk-bearing gross is short, net "
-            f"{net_pct:+.0%} of equity) — MARKET-NEUTRAL mandate: prefer LONG setups to rebalance")
+            f"{net_pct:+.0%} of equity) — diversification: add a quality LONG setup IF one exists "
+            f"to cut concentration; a solo regime-aligned short is still valid (not a flat)")
 
 
 def portfolio_health(

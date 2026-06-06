@@ -34,10 +34,15 @@ trigger → `cancel_triggers`), build it into the skill so the team does it thro
 Independently re-derive equity mark-to-market and verify every trade's size / stop / PnL / funding
 sign / RR before trusting gate output. Scrutinize ANY financial math for errors and surface them.
 
-### 5. Market-neutral — guard long/short symmetry.
-Long and short are co-equal edges; the desk targets ~zero net **directional risk** and may hold longs
-AND shorts at once. Actively hunt for any long/short bias creeping back (code, thresholds, gates,
-sizing, agent prompts, lessons). The ONE sanctioned asymmetry is the news bad>good advisory tilt.
+### 5. ALL-WEATHER — profit in every regime; guard long/short symmetry.
+"Market-neutral" here means **profit in ALL market conditions** (trend, range, chop/madness) using
+the full toolkit — NOT holding ~zero net exposure. **Net exposure is a MANAGED RISK PARAMETER, not a
+forced zero:** a single regime-aligned position with no available hedge is valid and expected; the
+tilt nag is a soft diversification signal, NEVER a reason to stand flat. ACTIVELY pursue the 5%/mo
+target (Pillar 1 pacing) and ADAPT the playbook to the regime (Pillar 2: trend→trend-follow,
+range→mean-reversion, madness→smaller/relative-value, transition→confirm). Long and short remain
+**co-equal** edges — actively hunt and kill any long/short bias creeping into code, thresholds,
+gates, sizing, prompts, or lessons. The ONE sanctioned asymmetry is the news bad>good advisory tilt.
 
 ### 6. Be proactively alert; report flags without being asked.
 Always watch for issues and surface them as they appear — then turn them into skill improvements

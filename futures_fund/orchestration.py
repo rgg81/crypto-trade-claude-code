@@ -196,6 +196,13 @@ def preflight_step(exchange, settings: Settings, state_dir, memory_dir,
     for s in settings.symbols:
         b = build_symbol_brief(exchange, s, settings.timeframe, now=now)  # last COMPLETED bar
         b["exchange_id"] = ctx.specs[s].symbol  # raw id (e.g. BTCUSDT) agents MUST use for output
+        # Pillar 2 ADAPT: attach the regime-routed in-season playbook for this symbol's quadrant, so
+        # the team switches strategy with the tape (trend->trend-follow, range->mean-reversion).
+        try:
+            from futures_fund.playbook import playbook_for
+            b["playbook"] = playbook_for(b.get("regime", ""))
+        except Exception:  # noqa: BLE001 — advisory; never break the brief
+            pass
         pos = held_by_raw.get(b["exchange_id"])
         if pos is not None:  # carried position -> attach the HOLD/CLOSE review card
             b["holding"] = _holding_card(pos, b, now, settings.timeframe,
