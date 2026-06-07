@@ -62,6 +62,37 @@ def oi_change_for(exchange, symbol: str, timeframe: str = "4h", now: datetime | 
         return None
 
 
+def flag_duplicate_positioning(briefs: list[dict]) -> list[dict]:
+    """DATA-INTEGRITY guard (cy50): the Binance globalLongShortAccountRatio feed can ALIAS one
+    symbol's positioning onto another — observed DOGE returning ETH's long_short_ratio 2.3456 AND
+    long_account 0.7011 byte-identical (reproducible even with the correct raw id). Identical
+    positioning across DISTINCT symbols is a feed-alias bug, not market reality, and we cannot tell
+    which symbol the value really belongs to. So when >=2 briefs share the SAME non-null
+    (long_short_ratio, long_account) pair, NULL those two fields for EVERY member of the group and
+    stamp `positioning_anomaly='duplicate_ls_feed'` so the analysts down-weight (they fall back to
+    price/OI). Fail-safe: nulling positioning only DEGRADES a signal, never fabricates one;
+    requiring BOTH fields to match exactly makes a false positive (two distinct symbols
+    legitimately identical to full precision) vanishingly unlikely. Mutates+returns the briefs."""
+    from collections import defaultdict
+    groups: dict = defaultdict(list)
+    for b in briefs:
+        lsr = b.get("long_short_ratio")
+        la = b.get("long_account")
+        if lsr is None or la is None:
+            continue
+        groups[(lsr, la)].append(b)
+    for members in groups.values():
+        # DISTINCT symbols only — the same symbol appearing twice (e.g. a regime-panel duplicate)
+        # is not an alias; an alias is two different ids carrying the same positioning row.
+        syms = {m.get("exchange_id") or m.get("symbol") for m in members}
+        if len(syms) > 1:
+            for m in members:
+                m["long_short_ratio"] = None
+                m["long_account"] = None
+                m["positioning_anomaly"] = "duplicate_ls_feed"
+    return briefs
+
+
 def _derivatives(exchange, symbol: str, timeframe: str) -> dict:
     """OI trend + long/short positioning; all-None if the feed is unavailable (graceful)."""
     out = {"oi_value": None, "oi_change": None, "long_short_ratio": None, "long_account": None}

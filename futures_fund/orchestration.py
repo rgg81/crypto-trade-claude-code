@@ -220,6 +220,11 @@ def preflight_step(exchange, settings: Settings, state_dir, memory_dir,
     # feeds BOTH the preflight regime call below and (via context['briefs']) the Phase-4.6
     # reclassify recompute. Fail-safe: unpriceable majors are skipped (regime degrades as before).
     briefs.extend(_regime_panel_briefs(exchange, briefs, settings.timeframe, now))
+    # DATA-INTEGRITY: null any positioning the globalLongShortAccountRatio feed ALIASED across
+    # distinct symbols (cy50: DOGE returned ETH's L/S+long_account verbatim) so the team can't
+    # trade on a feed bug — done before archiving so the archive records the cleaned values too.
+    from futures_fund.brief import flag_duplicate_positioning
+    flag_duplicate_positioning(briefs)
     try:
         from futures_fund.vendors import archive_jsonl
         for b in briefs:

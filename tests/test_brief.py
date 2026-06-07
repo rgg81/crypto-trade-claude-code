@@ -167,3 +167,43 @@ def test_oi_change_for_none_on_feed_error():
         def open_interest_history(self, *a, **k):
             raise RuntimeError("feed down")
     assert oi_change_for(_Boom(), "B", "4h", now=_FAR_NOW) is None
+
+
+def test_flag_duplicate_positioning_nulls_aliased_feed():
+    """DATA-INTEGRITY (cy50): the globalLongShortAccountRatio feed aliased DOGE onto ETH (identical
+    long_short_ratio 2.3456 AND long_account 0.7011). Distinct symbols sharing the SAME non-null
+    (L/S, long_account) pair = a feed-alias bug; null positioning for EVERY member + flag, since we
+    cannot tell which is correct. Distinct values and None positioning are left untouched."""
+    from futures_fund.brief import flag_duplicate_positioning
+    briefs = [
+        {"exchange_id": "ETHUSDT", "long_short_ratio": 2.3456, "long_account": 0.7011},
+        {"exchange_id": "DOGEUSDT", "long_short_ratio": 2.3456, "long_account": 0.7011},  # aliased
+        {"exchange_id": "BTCUSDT", "long_short_ratio": 2.0184, "long_account": 0.6687},  # distinct
+        {"exchange_id": "XRPUSDT", "long_short_ratio": None, "long_account": None},  # no feed
+    ]
+    out = flag_duplicate_positioning(briefs)
+    by = {b["exchange_id"]: b for b in out}
+    # the colliding pair: BOTH nulled + flagged (cannot tell which symbol owns 2.3456)
+    for sym in ("ETHUSDT", "DOGEUSDT"):
+        assert by[sym]["long_short_ratio"] is None
+        assert by[sym]["long_account"] is None
+        assert by[sym]["positioning_anomaly"] == "duplicate_ls_feed"
+    # distinct symbol untouched, no anomaly flag
+    assert by["BTCUSDT"]["long_short_ratio"] == 2.0184
+    assert "positioning_anomaly" not in by["BTCUSDT"]
+    # None-positioning symbol is ignored (not grouped, not flagged)
+    assert "positioning_anomaly" not in by["XRPUSDT"]
+
+
+def test_flag_duplicate_positioning_ignores_same_symbol_repeat():
+    """A symbol appearing twice with identical positioning (e.g. a regime-panel duplicate) is NOT
+    an alias — only DISTINCT symbols colliding indicates the feed bug. Leave it untouched."""
+    from futures_fund.brief import flag_duplicate_positioning
+    briefs = [
+        {"exchange_id": "ETHUSDT", "long_short_ratio": 2.3456, "long_account": 0.7011},
+        {"exchange_id": "ETHUSDT", "long_short_ratio": 2.3456, "long_account": 0.7011},
+    ]
+    out = flag_duplicate_positioning(briefs)
+    for b in out:
+        assert b["long_short_ratio"] == 2.3456
+        assert "positioning_anomaly" not in b
