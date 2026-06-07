@@ -93,11 +93,18 @@ def flag_duplicate_positioning(briefs: list[dict]) -> list[dict]:
     return briefs
 
 
-def _derivatives(exchange, symbol: str, timeframe: str) -> dict:
-    """OI trend + long/short positioning; all-None if the feed is unavailable (graceful)."""
+def _derivatives(exchange, symbol: str, timeframe: str, now: datetime | None = None) -> dict:
+    """OI trend + long/short positioning; all-None if the feed is unavailable (graceful). Reads the
+    LAST COMPLETED bar (drops the still-forming one via last_completed_frame) so positioning matches
+    the brief's completed-bar price — the same forming-candle discipline OHLCV and the OI trigger
+    gate apply. This also sidesteps the simulated globalLongShortAccountRatio feed-alias, which is
+    byte-identical only on the FORMING bar (cy50: DOGE==ETH on the in-progress candle) while the
+    CLOSED bar is clean per symbol — so reading the closed bar avoids the alias at the source (the
+    flag_duplicate_positioning de-dupe stays a fail-safe backstop). Pass `now` for the drop."""
     out = {"oi_value": None, "oi_change": None, "long_short_ratio": None, "long_account": None}
     try:
-        oi = exchange.open_interest_history(symbol, period=timeframe, limit=12)
+        oi = last_completed_frame(
+            exchange.open_interest_history(symbol, period=timeframe, limit=12), now, timeframe)
         if len(oi) > 1:
             out["oi_value"] = float(oi["oi_value"].iloc[-1])
             base = oi["oi_value"].iloc[0]
@@ -105,7 +112,8 @@ def _derivatives(exchange, symbol: str, timeframe: str) -> dict:
     except Exception:
         pass
     try:
-        lsr = exchange.long_short_ratio(symbol, period=timeframe, limit=6)
+        lsr = last_completed_frame(
+            exchange.long_short_ratio(symbol, period=timeframe, limit=6), now, timeframe)
         if len(lsr):
             out["long_short_ratio"] = float(lsr["long_short_ratio"].iloc[-1])
             out["long_account"] = float(lsr["long_account"].iloc[-1])
@@ -150,5 +158,5 @@ def build_symbol_brief(exchange, symbol: str, timeframe: str = "4h",
         "funding_rate": float(funding.current_rate),
         "funding_interval_hours": float(funding.interval_hours),
         "mark_price": float(funding.mark_price),
-        **_derivatives(exchange, symbol, timeframe),
+        **_derivatives(exchange, symbol, timeframe, now=now),
     }

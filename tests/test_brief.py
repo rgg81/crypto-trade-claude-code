@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import numpy as np
 import pandas as pd
@@ -193,6 +193,58 @@ def test_flag_duplicate_positioning_nulls_aliased_feed():
     assert "positioning_anomaly" not in by["BTCUSDT"]
     # None-positioning symbol is ignored (not grouped, not flagged)
     assert "positioning_anomaly" not in by["XRPUSDT"]
+
+
+def test_derivatives_drops_forming_ls_and_oi_bar():
+    """_derivatives must read the LAST COMPLETED bar for the OI-trend AND long/short positioning —
+    the same forming-candle discipline OHLCV and the OI trigger-gate already apply — so the brief's
+    positioning matches its completed-bar price. This ALSO sidesteps the simulated
+    globalLongShortAccountRatio feed-alias, which is byte-identical only on the FORMING bar (cy50:
+    DOGE==ETH on the in-progress candle) while the CLOSED bar is clean/distinct per symbol."""
+    from futures_fund.brief import _derivatives
+    t_prev = datetime(2026, 6, 7, 4, 0, tzinfo=UTC)
+    t_closed = datetime(2026, 6, 7, 8, 0, tzinfo=UTC)
+    t_forming = datetime(2026, 6, 7, 12, 0, tzinfo=UTC)
+    now = t_forming + timedelta(minutes=36)  # inside the 12:00-16:00 window -> 12:00 is FORMING
+    ts = [t_prev, t_closed, t_forming]
+
+    class _Ex:
+        def open_interest_history(self, symbol, period="4h", limit=12):
+            # 999 = forming, must be dropped
+            return pd.DataFrame({"timestamp": ts, "oi_value": [100.0, 110.0, 999.0]})
+
+        def long_short_ratio(self, symbol, period="4h", limit=6):
+            # 2.3456 / 0.7011 = the aliased FORMING bar, must be dropped
+            return pd.DataFrame({"timestamp": ts,
+                                 "long_short_ratio": [2.30, 2.3156, 2.3456],
+                                 "long_account": [0.69, 0.6984, 0.7011],
+                                 "short_account": [0.31, 0.3016, 0.2989]})
+
+    out = _derivatives(_Ex(), "DOGEUSDT", "4h", now=now)
+    # reads the CLOSED 08:00 values, NOT the forming 12:00 aliased ones
+    assert out["long_short_ratio"] == 2.3156
+    assert out["long_account"] == 0.6984
+    assert out["oi_value"] == 110.0  # forming 999 dropped
+    assert abs(out["oi_change"] - (110.0 / 100.0 - 1.0)) < 1e-9  # 0.10 over completed bars
+
+
+def test_derivatives_keeps_last_bar_when_closed_or_no_now():
+    """Backward-compat: with now=None (or an already-closed last bar) no row is dropped."""
+    from futures_fund.brief import _derivatives
+    ts = pd.date_range("2026-06-01", periods=3, freq="4h", tz="UTC")
+
+    class _Ex:
+        def open_interest_history(self, symbol, period="4h", limit=12):
+            return pd.DataFrame({"timestamp": ts, "oi_value": [100.0, 110.0, 120.0]})
+
+        def long_short_ratio(self, symbol, period="4h", limit=6):
+            return pd.DataFrame({"timestamp": ts, "long_short_ratio": [2.0, 2.1, 2.2],
+                                 "long_account": [0.66, 0.67, 0.6875],
+                                 "short_account": [0.34, 0.33, 0.3125]})
+
+    out = _derivatives(_Ex(), "X", "4h", now=None)  # no now -> keep the last row
+    assert out["long_short_ratio"] == 2.2
+    assert out["oi_value"] == 120.0
 
 
 def test_flag_duplicate_positioning_ignores_same_symbol_repeat():
