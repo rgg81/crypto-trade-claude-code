@@ -72,6 +72,28 @@ def test_adx_returns_strength_and_directional_components():
     assert mdi2 > pdi2                   # downtrend -> -DI above +DI
 
 
+def test_adx_handles_zero_di_sum_without_object_dtype_collapse():
+    """REGRESSION: when (plus_di + minus_di) hits exactly 0.0 at any bar (leading inside/one-sided
+    bars produce plus_dm==minus_dm==0), the old code did `.replace(0.0, pd.NA)`, which coerced the
+    series to OBJECT dtype; the subsequent `dx.ewm().mean()` then raised TypeError, was swallowed by
+    the bare except, and adx silently returned (0,0,0) — a real strong trend misread as 'no trend'
+    (observed live: BTC/HYPE ADX=0 while ETH=65.6). A clearly-trending series whose early bars force
+    a 0.0 DI-sum must still yield a real, positive ADX."""
+    from futures_fund.baseline import adx
+    n = 40
+    # 5 converging INSIDE bars (force DI-sum == 0.0 early) then a clean uptrend
+    highs = [120, 118, 116, 114, 112] + [112 + i for i in range(n - 5)]
+    lows = [80, 82, 84, 86, 88] + [88 + i * 0.8 for i in range(n - 5)]
+    close = [(h + lo) / 2 for h, lo in zip(highs, lows, strict=True)]
+    df = pd.DataFrame({
+        "timestamp": pd.date_range("2026-01-01", periods=n, freq="4h", tz="UTC"),
+        "open": close, "high": highs, "low": lows, "close": close, "volume": 1.0,
+    })
+    a, pdi, mdi = adx(df)
+    assert a > 0.0          # NOT the silent (0,0,0) collapse
+    assert pdi > mdi        # the uptrend's +DI dominates
+
+
 def test_ema_slope_sign_tracks_trend():
     from futures_fund.baseline import ema_slope
     assert ema_slope(_trend_df(0.8), 20) > 0

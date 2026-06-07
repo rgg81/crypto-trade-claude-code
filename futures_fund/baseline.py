@@ -53,7 +53,11 @@ def adx(df: pd.DataFrame, period: int = _ATR_PERIOD) -> tuple[float, float, floa
         atr = tr.ewm(alpha=1.0 / period, adjust=False).mean()
         plus_di = 100.0 * (plus_dm.ewm(alpha=1.0 / period, adjust=False).mean() / atr)
         minus_di = 100.0 * (minus_dm.ewm(alpha=1.0 / period, adjust=False).mean() / atr)
-        dx = 100.0 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0.0, pd.NA)
+        # Replace the zero denominator with a FLOAT nan (not pd.NA): pd.NA coerces the series to
+        # object dtype, and the following dx.ewm().mean() then raises TypeError (swallowed by the
+        # except -> a silent (0,0,0) ADX, a real trend misread as 'no trend'). A float nan keeps
+        # the series float64.
+        dx = 100.0 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0.0, float("nan"))
         adx_val = dx.ewm(alpha=1.0 / period, adjust=False).mean().iloc[-1]
         out = (adx_val, plus_di.iloc[-1], minus_di.iloc[-1])
         return tuple(0.0 if pd.isna(v) else float(v) for v in out)  # type: ignore[return-value]
