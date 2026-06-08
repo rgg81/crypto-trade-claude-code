@@ -8,6 +8,7 @@ from futures_fund.pending_orders import (
     check_pending_orders,
     fired_to_proposal,
     load_pending_orders,
+    non_crypto_triggers,
     revalidate_triggers,
     save_pending_orders,
     upsert_triggers,
@@ -338,3 +339,26 @@ def test_revalidate_triggers_partitions_stale_and_healthy():
     stale, healthy = revalidate_triggers([stale_short, healthy_short, no_swing], swings)
     assert [o.symbol for o in stale] == ["ETHUSDT"]
     assert {o.symbol for o in healthy} == {"BTCUSDT", "SOLUSDT"}  # no-swing kept (fail-safe)
+
+
+def test_non_crypto_triggers_partitions_and_fails_closed():
+    btc = _o(symbol="BTCUSDT")          # proven crypto -> tradeable
+    xau = _o(symbol="XAUUSDT")          # proven non-crypto (tokenized gold) -> untradeable
+    ghost = _o(symbol="GHOSTUSDT")      # ABSENT from the map -> fail-closed -> untradeable
+    nullv = _o(symbol="NULLUSDT")       # mapped to None (unknown) -> fail-closed -> untradeable
+    is_crypto = {"BTCUSDT": True, "XAUUSDT": False, "NULLUSDT": None}  # GHOST absent on purpose
+    untradeable, tradeable = non_crypto_triggers([btc, xau, ghost, nullv], is_crypto)
+    assert {o.symbol for o in tradeable} == {"BTCUSDT"}              # only PROVEN crypto kept
+    assert {o.symbol for o in untradeable} == {"XAUUSDT", "GHOSTUSDT", "NULLUSDT"}  # fail-closed
+
+
+def test_non_crypto_triggers_direction_agnostic():
+    # SYMMETRY (Rule 5): classification touches only the SYMBOL, never the side.
+    nc_long = _o(symbol="XAUUSDT", direction="long", trigger=4264.0, stop=4200.0)
+    nc_short = _o(symbol="XAUUSDT", direction="short", trigger=4264.0, stop=4288.0)
+    c_long = _o(symbol="ETHUSDT", direction="long")
+    c_short = _o(symbol="ETHUSDT", direction="short")
+    is_crypto = {"XAUUSDT": False, "ETHUSDT": True}
+    untradeable, tradeable = non_crypto_triggers([nc_long, nc_short, c_long, c_short], is_crypto)
+    assert {o.direction for o in untradeable} == {"long", "short"}  # BOTH sides of the stock retired
+    assert {o.direction for o in tradeable} == {"long", "short"}    # BOTH sides of the coin kept

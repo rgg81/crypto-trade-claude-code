@@ -64,15 +64,43 @@ def parse_symbol_spec(market: dict, tiers: list[dict]) -> SymbolSpec:
     )
 
 
+def is_crypto_market(market: dict | None) -> bool:
+    """CRYPTO-ONLY allowlist over a ccxt market dict (the one load_markets() populates). The desk
+    trades cryptocurrencies ONLY. Binance now lists tokenized equities/commodities/metals/pre-IPO
+    and crypto baskets as USDT perps (market.info.underlyingType in EQUITY / KR_EQUITY / COMMODITY
+    / PREMARKET / INDEX); a CRYPTOCURRENCY is exactly underlyingType == 'COIN'. INDEX (BTCDOM/DEFI
+    baskets) is excluded too — a basket/dominance index is not a single coin.
+
+    FAIL-CLOSED on missing / ambiguous metadata: a market we cannot PROVE is a coin is excluded
+    (a real coin is just re-scouted next cycle; a TradFi instrument must NEVER leak in). The
+    secondary contractType reject (TRADIFI / dated-QUARTER) is belt-and-suspenders. Pure and
+    DIRECTION-AGNOSTIC — classifies the instrument only, never side/size (long/short symmetric)."""
+    if not market:
+        return False
+    info = market.get("info") or {}
+    if info.get("underlyingType") != "COIN":   # positive allowlist (excludes TradFi + INDEX + None)
+        return False
+    ct = str(info.get("contractType") or "").upper()
+    if "TRADIFI" in ct or "QUARTER" in ct:     # TradFi perp / COIN-dated future != crypto perp
+        return False
+    return True
+
+
 def scan_universe(client, top_n: int = 30) -> list[dict]:
     """Rank the live USD-M linear perp universe by 24h quote volume — the Watcher's scouting
     pool, recomputed every cycle so the universe rotates with the market. Public/keyless
     (one fetch_tickers call). Returns up to top_n rows: {symbol, last, chg_24h_pct, vol_24h_usd},
-    most-liquid first. Skips non-USDT-perp symbols and anything with zero volume/price."""
+    most-liquid first. Skips non-USDT-perp symbols, anything with zero volume/price, and — the
+    CRYPTO-ONLY gate — any market that is not a single-coin crypto perp (tokenized stocks /
+    commodities / metals / pre-IPO / indices are excluded via `is_crypto_market`, cross-referencing
+    `client.markets`; fail-closed if markets is unloaded so no non-crypto ever slips through)."""
     tickers = client.fetch_tickers()
+    markets = getattr(client, "markets", None) or {}
     rows: list[dict] = []
     for sym, t in tickers.items():
         if not sym.endswith("/USDT:USDT"):
+            continue
+        if not is_crypto_market(markets.get(sym)):   # CRYPTO-ONLY: drop TradFi/index/unverifiable
             continue
         qv = t.get("quoteVolume") or 0.0
         last = t.get("last")

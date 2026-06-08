@@ -172,6 +172,23 @@ def revalidate_triggers(orders: list[PendingOrder],
     return stale, healthy
 
 
+def non_crypto_triggers(orders: list[PendingOrder],
+                        is_crypto_by_symbol: dict) -> tuple[list, list]:
+    """Partition armed orders into (untradeable, tradeable) by whether the symbol is a CRYPTO
+    market. The desk is crypto-only: a trigger resting on a now-listed tokenized stock / commodity
+    / metal / pre-IPO / index must be retired through the normal gate flow (never a manual store
+    edit). `is_crypto_by_symbol` maps RAW symbol -> True (proven crypto) / False (proven non-crypto)
+    / None or ABSENT (unknown). FAIL-CLOSED — the deliberate OPPOSITE of revalidate_triggers'
+    fail-SAFE-keep: only a value of exactly True is tradeable; False / None / missing all go to
+    untradeable (never keep a stock armed on a classification gap). Pure and DIRECTION-AGNOSTIC —
+    keys on the symbol alone, never the side, so the crypto-only gate adds no long/short bias."""
+    untradeable, tradeable = [], []
+    for o in orders:
+        ok = (is_crypto_by_symbol or {}).get(o.symbol)
+        (tradeable if ok is True else untradeable).append(o)
+    return untradeable, tradeable
+
+
 def check_pending_orders(state_dir, bars_by_symbol: dict, cycle_no: int,
                          held_symbols=frozenset(),
                          oi_change_by_symbol: dict | None = None) -> tuple[list, list, list]:

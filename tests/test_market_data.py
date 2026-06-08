@@ -1,5 +1,6 @@
 from futures_fund.market_data import (
     FundingInfo,
+    is_crypto_market,
     parse_funding,
     parse_long_short_ratio,
     parse_ohlcv,
@@ -9,7 +10,15 @@ from futures_fund.market_data import (
 )
 
 
+def _coin(sym):  # a ccxt market dict for a single-coin crypto perp
+    return {"symbol": sym, "info": {"underlyingType": "COIN", "contractType": "PERPETUAL"}}
+
+
 class _TickerClient:
+    # scan_universe cross-references client.markets for the crypto-only allowlist, so the fake
+    # must carry COIN metadata for the symbols it expects to keep (BTC, DOGE).
+    markets = {"BTC/USDT:USDT": _coin("BTC/USDT:USDT"), "DOGE/USDT:USDT": _coin("DOGE/USDT:USDT")}
+
     def fetch_tickers(self):
         return {
             "BTC/USDT:USDT": {"quoteVolume": 1e10, "percentage": 0.1, "last": 70000.0},
@@ -30,6 +39,54 @@ def test_scan_universe_excludes_non_perp_and_zero_volume():
     syms = {r["symbol"] for r in scan_universe(_TickerClient(), top_n=10)}
     assert "ETH/USDT:USD" not in syms  # spot/quarterly, not a USDT perp
     assert "FOO/USDT:USDT" not in syms and "BAR/USDT:USDT" not in syms
+
+
+def _market(sym, underlying, contract="TRADIFI_PERPETUAL"):
+    return {"symbol": sym, "info": {"underlyingType": underlying, "contractType": contract}}
+
+
+def test_is_crypto_market_allowlist():
+    # KEEP only single-coin crypto perps
+    assert is_crypto_market(_coin("BTC/USDT:USDT")) is True
+    assert is_crypto_market(_coin("1000PEPE/USDT:USDT")) is True   # scaled base still a coin
+    assert is_crypto_market(_coin("USDC/USDT:USDT")) is True       # stable base still a coin
+    assert is_crypto_market({"info": {"underlyingType": "COIN"}}) is True  # missing ct but clearly COIN
+    # EXCLUDE every TradFi class Binance now lists as USDT perps
+    for ut in ("COMMODITY", "EQUITY", "KR_EQUITY", "PREMARKET", "INDEX"):
+        assert is_crypto_market(_market("X/USDT:USDT", ut)) is False
+    # EXCLUDE a COIN-settled dated future (not a perp the desk trades)
+    assert is_crypto_market(_market("BTC/USDT:USDT", "COIN", "CURRENT_QUARTER")) is False
+    # FAIL-CLOSED on missing / ambiguous metadata
+    assert is_crypto_market(None) is False
+    assert is_crypto_market({}) is False
+    assert is_crypto_market({"info": {}}) is False  # no underlyingType -> can't prove crypto
+
+
+class _MixedClient:
+    markets = {
+        "BTC/USDT:USDT": _coin("BTC/USDT:USDT"),
+        "DOGE/USDT:USDT": _coin("DOGE/USDT:USDT"),
+        "XAU/USDT:USDT": _market("XAU/USDT:USDT", "COMMODITY"),   # tokenized gold
+        "MU/USDT:USDT": _market("MU/USDT:USDT", "EQUITY"),        # tokenized equity
+        "SPCX/USDT:USDT": _market("SPCX/USDT:USDT", "PREMARKET"),
+        "DEFI/USDT:USDT": _market("DEFI/USDT:USDT", "INDEX", "PERPETUAL"),  # crypto BASKET, not a coin
+        "SKHYNIX/USDT:USDT": _market("SKHYNIX/USDT:USDT", "KR_EQUITY"),
+        "BTCQ/USDT:USDT": _market("BTCQ/USDT:USDT", "COIN", "CURRENT_QUARTER"),  # coin quarterly
+        # GHOST/USDT:USDT is intentionally ABSENT from markets -> fail-closed
+    }
+
+    def fetch_tickers(self):
+        v = 1e9
+        return {s: {"quoteVolume": v, "percentage": 1.0, "last": 1.0}
+                for s in list(self.markets) + ["GHOST/USDT:USDT"]}
+
+
+def test_scan_universe_keeps_only_coin_perps_excludes_tradfi():
+    syms = {r["symbol"] for r in scan_universe(_MixedClient(), top_n=20)}
+    assert syms == {"BTC/USDT:USDT", "DOGE/USDT:USDT"}  # ONLY the COIN perps
+    for x in ("XAU/USDT:USDT", "MU/USDT:USDT", "SPCX/USDT:USDT", "DEFI/USDT:USDT",
+              "SKHYNIX/USDT:USDT", "BTCQ/USDT:USDT", "GHOST/USDT:USDT"):
+        assert x not in syms  # TradFi / index / quarterly / absent-from-markets all excluded
 
 MARKET = {
     "id": "BTCUSDT",

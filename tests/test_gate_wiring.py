@@ -8,7 +8,13 @@ from futures_fund.contracts import AgentProposal
 from futures_fund.orchestration import gate_execute_step, preflight_step
 from futures_fund.pending_orders import PendingOrder, load_pending_orders, save_pending_orders
 from futures_fund.state import load_positions
-from tests.test_orchestration import FakeExchange, _HttpClient, _settings, _uptrend
+from tests.test_orchestration import (
+    FakeExchange,
+    _HttpClient,
+    _settings,
+    _UnionExchange,
+    _uptrend,
+)
 
 NOW = dt.datetime(2026, 3, 1, tzinfo=UTC)
 
@@ -540,3 +546,137 @@ def test_gate_audit_failopen_without_ground_truth(tmp_path):
     report = gate_execute_step(ex, _settings(), state_dir, memory_dir, now=NOW, cycle_no=1,
                                proposals=[clean], regime_state=_regime("risk_on"))
     assert report["audit_dropped"] == 0
+
+
+class _CryptoOnlyExchange(_UnionExchange):
+    """_UnionExchange that classifies XAUUSDT (tokenized gold) as NON-crypto — exercises the
+    desk's crypto-only gate. is_crypto_raw is the one method the real FuturesExchange adds."""
+    def is_crypto_raw(self, raw_id):
+        return raw_id != "XAUUSDT"  # XAU = COMMODITY (not a coin); everything else is crypto
+
+    def symbol_spec(self, symbol):
+        from futures_fund.models import MmrBracket, SymbolSpec
+        raw = {"BTC/USDT:USDT": "BTCUSDT", "XAU/USDT:USDT": "XAUUSDT"}.get(symbol, "BTCUSDT")
+        return SymbolSpec(symbol=raw, tick_size=0.01, step_size=0.001, min_notional=5.0,
+                          mmr_brackets=[MmrBracket(notional_floor=0, notional_cap=1_000_000,
+                                                   mmr=0.004, maint_amount=0.0, max_leverage=125)])
+
+
+def test_gate_auto_retires_noncrypto_trigger_even_when_it_would_fire(tmp_path):
+    # CP8: an armed trigger resting on a NON-crypto market (XAU) is retired through the normal gate
+    # flow — dropped from BOTH fired (never opens) and remaining (not persisted) — while a COIN
+    # trigger on the same store survives. Mirrors the stale-trigger auto-revalidation invariant.
+    state_dir, memory_dir = tmp_path / "s", tmp_path / "m"
+    ex = _CryptoOnlyExchange({"BTC/USDT:USDT": _uptrend(), "XAU/USDT:USDT": _uptrend()},
+                             {"BTCUSDT": "BTC/USDT:USDT", "XAUUSDT": "XAU/USDT:USDT"})
+    last = _pf(state_dir, memory_dir, ex)["briefs"][0]["last_close"]
+    save_pending_orders(state_dir, [
+        # XAU short WOULD fire (uptrend close < trigger 99999) — must still be retired, never opened
+        PendingOrder(symbol="XAUUSDT", direction="short", kind="stop_entry", trigger_level=99999.0,
+                     stop=100000.0, take_profits=[1.0], atr=2.0, created_cycle=1, expires_cycle=9),
+        # BTC long does NOT fire (close < trigger) — a healthy COIN trigger that must SURVIVE
+        PendingOrder(symbol="BTCUSDT", direction="long", kind="stop_entry", trigger_level=last + 50.0,
+                     stop=last - 8.0, take_profits=[last + 100.0], atr=2.0, created_cycle=1,
+                     expires_cycle=9),
+    ])
+    report = gate_execute_step(ex, _settings(), state_dir, memory_dir, now=NOW, cycle_no=2,
+                               proposals=[])
+    assert report["auto_retired_noncrypto"] == 1
+    assert report["opened"] == 0  # the would-fire XAU short never opened a position
+    store = {o.symbol for o in load_pending_orders(state_dir)}
+    assert "XAUUSDT" not in store and "BTCUSDT" in store  # stock retired, coin survives
+    # operator visibility (Rule 6): the retirement is surfaced
+    assert any("NON-CRYPTO" in w for w in report.get("warnings", []))
+
+
+def test_gate_never_arms_noncrypto_trigger(tmp_path):
+    # CP7: even if a non-crypto trigger reaches the Trader output, it is never WRITTEN to the store.
+    # Direction-agnostic: a LONG and a SHORT non-crypto trigger are both refused; the COIN survives.
+    state_dir, memory_dir = tmp_path / "s", tmp_path / "m"
+    ex = _CryptoOnlyExchange({"BTC/USDT:USDT": _uptrend()},
+                             {"BTCUSDT": "BTC/USDT:USDT", "XAUUSDT": "XAU/USDT:USDT"})
+    last = _pf(state_dir, memory_dir, ex)["briefs"][0]["last_close"]
+    triggers = [
+        {"symbol": "BTCUSDT", "direction": "long", "kind": "stop_entry", "trigger_level": last + 50.0,
+         "stop": last - 8.0, "take_profits": [last + 100.0], "atr": 2.0, "expires_cycle": 9},
+        {"symbol": "XAUUSDT", "direction": "short", "kind": "stop_entry", "trigger_level": 4264.0,
+         "stop": 4288.0, "take_profits": [4205.0], "atr": 25.0, "expires_cycle": 9},
+        {"symbol": "XAUUSDT", "direction": "long", "kind": "stop_entry", "trigger_level": 4400.0,
+         "stop": 4300.0, "take_profits": [4600.0], "atr": 25.0, "expires_cycle": 9},
+    ]
+    report = gate_execute_step(ex, _settings(), state_dir, memory_dir, now=NOW, cycle_no=1,
+                               proposals=[], triggers=triggers)
+    store = {o.symbol for o in load_pending_orders(state_dir)}
+    assert store == {"BTCUSDT"}  # both XAU sides refused at arm-time; only the coin persisted
+
+
+def test_gate_purge_retires_resting_noncrypto_trigger_cp8_isolated(tmp_path):
+    # CP8-ISOLATING: a non-crypto trigger that does NOT fire (price condition unmet) rests in
+    # `remaining`; ONLY the CP8 purge can retire it (the open-refuse and arm-block guards never touch
+    # a resting non-firing trigger). This test FAILS if CP8 is removed — it isolates that guard.
+    state_dir, memory_dir = tmp_path / "s", tmp_path / "m"
+    ex = _CryptoOnlyExchange({"BTC/USDT:USDT": _uptrend(), "XAU/USDT:USDT": _uptrend()},
+                             {"BTCUSDT": "BTC/USDT:USDT", "XAUUSDT": "XAU/USDT:USDT"})
+    last = _pf(state_dir, memory_dir, ex)["briefs"][0]["last_close"]
+    save_pending_orders(state_dir, [
+        # XAU long does NOT fire (close << trigger 99999) -> rests in `remaining`; CP8 is its only exit
+        PendingOrder(symbol="XAUUSDT", direction="long", kind="stop_entry", trigger_level=99999.0,
+                     stop=99000.0, take_profits=[100000.0], atr=2.0, created_cycle=1, expires_cycle=9),
+        PendingOrder(symbol="BTCUSDT", direction="long", kind="stop_entry", trigger_level=last + 50.0,
+                     stop=last - 8.0, take_profits=[last + 100.0], atr=2.0, created_cycle=1,
+                     expires_cycle=9),
+    ])
+    report = gate_execute_step(ex, _settings(), state_dir, memory_dir, now=NOW, cycle_no=2,
+                               proposals=[])
+    assert report["triggers_fired"] == 0  # the resting case: neither trigger fires
+    assert report["auto_retired_noncrypto"] == 1
+    store = {o.symbol for o in load_pending_orders(state_dir)}
+    assert "XAUUSDT" not in store and "BTCUSDT" in store  # resting non-crypto purged by CP8 alone
+
+
+def _pinned_settings():
+    from futures_fund.config import Settings
+    # simulates a config.symbols pin / --symbols override that smuggles a non-crypto past the scout
+    return Settings(account_size_usdt=10_000.0,
+                    symbols=["BTC/USDT:USDT", "XAU/USDT:USDT"], timeframe="4h")
+
+
+def test_gate_refuses_noncrypto_market_open(tmp_path):
+    # CP-proposals: the deterministic gate is THE authority — a WITH-regime MARKET open on a
+    # non-crypto symbol (XAU pinned via config.symbols/--symbols, or a Trader error) is REFUSED,
+    # never opened. Closes the leak that the crypto gate covered scout+triggers but NOT opens.
+    state_dir, memory_dir = tmp_path / "s", tmp_path / "m"
+    settings = _pinned_settings()
+    ex = _CryptoOnlyExchange({"BTC/USDT:USDT": _uptrend(), "XAU/USDT:USDT": _uptrend()},
+                             {"BTCUSDT": "BTC/USDT:USDT", "XAUUSDT": "XAU/USDT:USDT"})
+    pf = preflight_step(ex, settings, state_dir, memory_dir, now=NOW, cycle_no=1,
+                        http_client=_HttpClient())
+    xau = next(b for b in pf["briefs"] if b["exchange_id"] == "XAUUSDT")["last_close"]
+    proposal = AgentProposal(symbol="XAUUSDT", direction="long", entry=xau, stop=xau - 4.0,
+                             take_profits=[xau + 12.0], atr=2.0, confidence=0.7,
+                             rationale="non-crypto open must be refused").model_dump()
+    report = gate_execute_step(ex, settings, state_dir, memory_dir, now=NOW, cycle_no=1,
+                               proposals=[proposal], regime_state=_regime("risk_on"))
+    assert report["opened"] == 0  # the with-regime non-crypto open was REFUSED
+    assert all(p.symbol != "XAUUSDT" for p in load_positions(state_dir))  # never held
+    assert report["auto_retired_noncrypto"] >= 1
+    assert any("NON-CRYPTO" in w for w in report.get("warnings", []))
+
+
+def test_gate_force_closes_held_noncrypto_position(tmp_path):
+    # A HELD non-crypto position (e.g. a legacy XAU long) is force-CLOSED through the normal flow —
+    # the desk is crypto-only and cannot carry a tokenized stock/commodity. Direction-symmetric.
+    from futures_fund.state import Position, save_positions
+    state_dir, memory_dir = tmp_path / "s", tmp_path / "m"
+    settings = _pinned_settings()
+    ex = _CryptoOnlyExchange({"BTC/USDT:USDT": _uptrend(), "XAU/USDT:USDT": _uptrend()},
+                             {"BTCUSDT": "BTC/USDT:USDT", "XAUUSDT": "XAU/USDT:USDT"})
+    held = Position(symbol="XAUUSDT", direction="long", qty=1.0, entry=100.0, stop=90.0,
+                    take_profits=[9999.0], leverage=3.0, margin=33.3, liq_price=70.0,
+                    opened_cycle=0, opened_ts=NOW)  # TP/stop unreachable -> would HOLD if crypto
+    save_positions(state_dir, [held])
+    report = gate_execute_step(ex, settings, state_dir, memory_dir, now=NOW, cycle_no=2,
+                               proposals=[], management=[])  # team gave no explicit close
+    assert "XAUUSDT" not in {p.symbol for p in load_positions(state_dir)}  # force-closed by the gate
+    assert report["auto_retired_noncrypto"] >= 1
+    assert any("NON-CRYPTO" in w for w in report.get("warnings", []))

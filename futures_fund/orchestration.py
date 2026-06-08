@@ -564,6 +564,7 @@ def gate_execute_step(exchange, settings: Settings, state_dir, memory_dir,
         check_pending_orders,
         fired_to_proposal,
         load_pending_orders,
+        non_crypto_triggers,
         revalidate_triggers,
         save_pending_orders,
         upsert_triggers,
@@ -589,6 +590,21 @@ def gate_execute_step(exchange, settings: Settings, state_dir, memory_dir,
     ctx = fetch_context(exchange, settings)
     unified_to_raw = {u: r for r, u in ctx.raw_to_unified.items()}
 
+    # CRYPTO-ONLY enforcement (desk trades CRYPTOCURRENCIES ONLY): the deterministic gate is THE
+    # authority, so non-crypto is refused on EVERY path — a held non-crypto position force-CLOSED,
+    # a fresh non-crypto OPEN is refused, and non-crypto triggers are purged (resting) / blocked
+    # (arm-time). One shared counter + action-list across all four sites. Capability-guarded (a
+    # legacy fake lacking is_crypto_raw skips, never production), FAIL-CLOSED, DIRECTION-symmetric
+    # (keys on symbol only). Binance now lists tokenized stocks/commodities/metals/pre-IPO/indices
+    # as USDT perps; the scout blocks them upstream, and these gate guards are the survival backstop
+    # for any that arrive via a config.symbols pin, a --symbols override, or a Trader mis-name.
+    _is_crypto_raw = getattr(exchange, "is_crypto_raw", None)
+    auto_retired_noncrypto = 0
+    noncrypto_actions: list = []
+
+    def _noncrypto(raw: str) -> bool:  # True iff the gate must REFUSE this symbol (fail-closed)
+        return _is_crypto_raw is not None and not _is_crypto_raw(raw)
+
     # Deterministic HALT enforcement AT the trade boundary: if the monitor (or anything) tripped
     # the halt — even mid-cycle, after preflight passed — open NO new positions. Holdings-review
     # CLOSES still run (a halt should DE-risk, not freeze us out of exiting).
@@ -608,6 +624,13 @@ def gate_execute_step(exchange, settings: Settings, state_dir, memory_dir,
     reduce_actions, reduce_warnings = [], []
     new_positions = []
     for p in positions:
+        if _noncrypto(p.symbol):   # crypto-only: force-CLOSE a non-crypto holding (normal flow)
+            force_close.add(p.symbol)
+            new_positions.append(p)
+            auto_retired_noncrypto += 1
+            noncrypto_actions.append(
+                f"force-CLOSE NON-CRYPTO holding {p.direction} {p.symbol} — desk is crypto-only")
+            continue
         m = by_raw.get(p.symbol)
         if m and m.get("action") == "close":
             force_close.add(p.symbol)
@@ -733,6 +756,28 @@ def gate_execute_step(exchange, settings: Settings, state_dir, memory_dir,
                 f"swing {anchor_kind} crossed to {anchor} (trigger stranded on the wrong side); "
                 f"re-arm at the true level if still valid")
 
+    # --- CRYPTO-ONLY purge (standing invariant, Rule 2): the desk trades CRYPTOCURRENCIES ONLY.
+    # Binance now lists tokenized equities/commodities/metals/pre-IPO and crypto baskets as USDT
+    # perps; the scout already blocks NEW non-crypto, and THIS retires any already resting in the
+    # store. An armed trigger whose symbol is not a crypto market is dropped from BOTH `fired`
+    # (never opens) AND `remaining` (not persisted) — the SAME flow as a stale/explicit cancel,
+    # never a manual store edit. Symmetric (keys on symbol, never the side) and FAIL-CLOSED
+    # (non_crypto_triggers retires anything not PROVEN crypto). Skipped only if the exchange lacks
+    # the is_crypto_raw capability (legacy/fake wiring) — the real FuturesExchange always has it.
+    if _is_crypto_raw is not None:
+        crypto_map = {o.symbol: bool(_is_crypto_raw(o.symbol)) for o in (fired + remaining)}
+        non_crypto, _ = non_crypto_triggers(fired + remaining, crypto_map)
+        nc_ids = {o.id for o in non_crypto}
+        if nc_ids:
+            fired = [o for o in fired if o.id not in nc_ids]
+            remaining = [o for o in remaining if o.id not in nc_ids]
+            auto_retired_noncrypto += len(nc_ids)
+            for o in non_crypto:
+                noncrypto_actions.append(
+                    f"auto-retired NON-CRYPTO {o.direction} {o.kind} {o.symbol} @ "
+                    f"{o.trigger_level} — desk is crypto-only (tokenized stock/commodity/index "
+                    f"is not a cryptocurrency); will not arm or fire")
+
     # --- Explicit cancellation: the Trader/RM may RETIRE an armed trigger whose thesis decayed, via
     # the normal proposals flow (`cancel_triggers`), so the TEAM cancels — not a manual store edit.
     # AUTHORITATIVE for the whole cycle: a canceled (symbol, direction?, kind?) does NOT fire this
@@ -780,6 +825,11 @@ def gate_execute_step(exchange, settings: Settings, state_dir, memory_dir,
             raw = ap.symbol if ap.symbol in ctx.specs_by_raw else unified_to_raw.get(ap.symbol)
             if raw is None:
                 dropped += 1
+                continue
+            if _noncrypto(raw):   # crypto-only: REFUSE a non-crypto fresh open (gate is authority)
+                auto_retired_noncrypto += 1
+                noncrypto_actions.append(
+                    f"refused NON-CRYPTO open {ap.direction} {raw} — desk is crypto-only")
                 continue
             funding = ctx.fundings[ctx.raw_to_unified[raw]].current_rate
             tp = to_trade_proposal(ap, funding).model_copy(update={"symbol": raw})
@@ -841,6 +891,19 @@ def gate_execute_step(exchange, settings: Settings, state_dir, memory_dir,
         _kept_new = [o for o in new_triggers if not _is_canceled(o)]
         n_canceled += len(new_triggers) - len(_kept_new)
         new_triggers = _kept_new
+    # CP7 ARM-TIME crypto-only guard: never WRITE a non-crypto trigger to the store, even if the
+    # Trader emitted one or a counter-regime conversion produced it (defense-in-depth behind the
+    # scout). Symmetric + fail-closed, same capability/counter as the purge above.
+    if _is_crypto_raw is not None and new_triggers:
+        nc_new, kept_new = non_crypto_triggers(
+            new_triggers, {o.symbol: bool(_is_crypto_raw(o.symbol)) for o in new_triggers})
+        if nc_new:
+            new_triggers = kept_new
+            auto_retired_noncrypto += len(nc_new)
+            for o in nc_new:
+                noncrypto_actions.append(
+                    f"blocked NON-CRYPTO arm {o.direction} {o.kind} {o.symbol} "
+                    f"— desk is crypto-only")
     save_pending_orders(state_dir, upsert_triggers(remaining, new_triggers))
     if isinstance(regime_state, dict):
         try:
@@ -857,6 +920,10 @@ def gate_execute_step(exchange, settings: Settings, state_dir, memory_dir,
     if stale_actions:                                # surface each so the team can re-arm (Rule 6)
         report.setdefault("actions", []).extend(stale_actions)
         report.setdefault("warnings", []).extend(stale_actions)
+    report["auto_retired_noncrypto"] = auto_retired_noncrypto  # crypto-only refusals this cycle
+    if noncrypto_actions:                            # surface each (Rule 6) — desk is crypto-only
+        report.setdefault("actions", []).extend(noncrypto_actions)
+        report.setdefault("warnings", []).extend(noncrypto_actions)
     # symmetric telemetry replacing dropped_short_regime: how many fresh entries went to market vs
     # were converted to a counter-regime confirmation trigger (operator can see the routing split).
     report["market_entries"] = len(market_fresh)

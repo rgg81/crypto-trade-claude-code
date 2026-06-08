@@ -6,6 +6,7 @@ from futures_fund.config import Settings
 from futures_fund.market_data import (
     FundingInfo,
     _filter_field,
+    is_crypto_market,
     parse_funding,
     parse_long_short_ratio,
     parse_ohlcv,
@@ -91,6 +92,19 @@ class FuturesExchange:
             if mk.get("id") == raw_id:
                 return sym
         return None
+
+    def is_crypto_raw(self, raw_id: str) -> bool:
+        """CRYPTO-ONLY classifier for a RAW exchange id (e.g. 'XAUUSDT'): resolve raw -> unified ->
+        ccxt market and classify with `is_crypto_market`. The desk trades cryptocurrencies only, so
+        this backs the gate's non-crypto trigger purge. Unknown/unresolvable id or any lookup error
+        -> False (FAIL-CLOSED: never assert crypto we cannot prove). Direction-agnostic."""
+        uni = self.unified_for_raw(raw_id)
+        if uni is None:
+            return False
+        try:
+            return is_crypto_market(self.client.market(uni))
+        except Exception:  # noqa: BLE001 — unknown market / ccxt error -> fail-closed (not crypto)
+            return False
 
     def symbol_spec(self, symbol: str) -> SymbolSpec:
         market = self.client.market(symbol)
