@@ -7,7 +7,7 @@ from futures_fund.models import (
     SymbolSpec,
     TradeProposal,
 )
-from futures_fund.risk_gate import GateInputs, evaluate
+from futures_fund.risk_gate import HARD_MIN_RR, MIN_RR, GateInputs, evaluate
 
 
 def _spec():
@@ -166,3 +166,26 @@ def test_risk_mult_zero_or_negative_never_increases_risk():
     assert zero.verdict in ("approve", "resize") and abs(zero.sized_trade.qty - base) < 1e-12
     neg = evaluate(_inputs(proposal=_proposal().model_copy(update={"risk_mult": -0.5})))
     assert neg.verdict == "veto"  # negative -> 0 risk -> zero qty -> safe veto
+
+
+def test_hard_min_rr_constant():
+    assert HARD_MIN_RR == 1.6 and MIN_RR == 2.0
+
+
+def test_gate_uses_adaptive_floor_below_default():
+    p = _proposal(tps=(108.5,))                    # RR (108.5-100)/(100-95) = 1.7
+    assert evaluate(_inputs(proposal=p, rr_floor=None)).verdict == "veto"   # None -> 2.0
+    assert evaluate(_inputs(proposal=p, rr_floor=1.6)).verdict in ("approve", "resize")
+
+
+def test_gate_hard_min_wraps_corrupt_floor():
+    p = _proposal(tps=(107.5,))                    # RR 1.5
+    d = evaluate(_inputs(proposal=p, rr_floor=0.5))   # hostile floor wrapped up to HARD_MIN_RR 1.6
+    assert d.verdict == "veto" and "RR" in d.reason
+
+
+def test_gate_default_rr_floor_unchanged_at_2():
+    p = _proposal(tps=(110.0,))                    # RR 2.0 exactly -> passes at default
+    assert evaluate(_inputs(proposal=p)).verdict in ("approve", "resize")
+    p17 = _proposal(tps=(108.5,))                  # RR 1.7 -> vetoed at default 2.0
+    assert evaluate(_inputs(proposal=p17)).verdict == "veto"

@@ -19,6 +19,7 @@ from futures_fund.sizing import choose_leverage, liq_distance_ratio, qty_from_ri
 
 MIN_RR = 2.0
 _RR_EPS = 1e-6  # float tolerance so an exactly-2R proposal isn't vetoed by rounding
+HARD_MIN_RR = 1.6  # gate-owned ABSOLUTE floor: an adaptive rr_floor never drops a veto below this
 MIN_LIQ_DISTANCE_MULT = 2.5
 
 
@@ -32,6 +33,7 @@ class GateInputs(BaseModel):
     weekly_pnl_pct: float = 0.0
     monthly_pnl_pct: float = 0.0
     pay_bnb: bool = False
+    rr_floor: float | None = None  # regime-adaptive RR floor; None -> MIN_RR. HARD_MIN_RR-wrapped.
 
 
 def _reward_risk(p: TradeProposal) -> float:
@@ -73,10 +75,12 @@ def evaluate(inp: GateInputs) -> RiskDecision:
     if not breaker.allow_new_entries:
         return RiskDecision(verdict="veto", reason=f"circuit breaker: {breaker.reason}")
 
-    # 2. Reward:risk (tolerate float error so an intended exactly-2R trade isn't vetoed)
+    # 2. Reward:risk — regime-adaptive floor, but NEVER below the gate-owned HARD_MIN_RR (a corrupt
+    #    or hostile rr_floor can only ever RAISE the floor, never breach the absolute safety bound).
     rr = _reward_risk(p)
-    if rr < MIN_RR - _RR_EPS:
-        return RiskDecision(verdict="veto", reason=f"RR {rr:.2f} < min {MIN_RR}")
+    floor = max(inp.rr_floor if inp.rr_floor is not None else MIN_RR, HARD_MIN_RR)
+    if rr < floor - _RR_EPS:
+        return RiskDecision(verdict="veto", reason=f"RR {rr:.2f} < min {floor:.2f}")
 
     # 3. Effective per-trade risk budget (caps × breaker multiplier × optional per-trade reduction)
     # Caution tier (caps already halved) AND the -5% step-down can both apply on the same
