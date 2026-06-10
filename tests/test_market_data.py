@@ -62,6 +62,25 @@ def test_is_crypto_market_allowlist():
     assert is_crypto_market({"info": {}}) is False  # no underlyingType -> can't prove crypto
 
 
+def _coin_base(sym, base):  # a COIN-classified perp that also carries its base asset
+    return {"symbol": sym, "base": base,
+            "info": {"underlyingType": "COIN", "contractType": "PERPETUAL", "baseAsset": base}}
+
+
+def test_is_crypto_market_excludes_commodity_proxy_coins():
+    # PAXG (PAX Gold) and XAUT (Tether Gold) are classified underlyingType=='COIN' by Binance, but
+    # are gold-backed PROXY tokens — economically commodities, not cryptocurrencies. The desk trades
+    # crypto only, so they are EXCLUDED despite the COIN tag (user call: "remove this paxg").
+    assert is_crypto_market(_coin_base("PAXG/USDT:USDT", "PAXG")) is False
+    assert is_crypto_market(_coin_base("XAUT/USDT:USDT", "XAUT")) is False
+    # case/whitespace robust + base read from info.baseAsset when the unified base is absent
+    assert is_crypto_market({"symbol": "PAXG/USDT:USDT",
+                             "info": {"underlyingType": "COIN", "baseAsset": "paxg"}}) is False
+    # a genuine coin that merely carries a base is still KEPT
+    assert is_crypto_market(_coin_base("BTC/USDT:USDT", "BTC")) is True
+    assert is_crypto_market(_coin_base("ETH/USDT:USDT", "ETH")) is True
+
+
 class _MixedClient:
     markets = {
         "BTC/USDT:USDT": _coin("BTC/USDT:USDT"),
@@ -72,6 +91,7 @@ class _MixedClient:
         "DEFI/USDT:USDT": _market("DEFI/USDT:USDT", "INDEX", "PERPETUAL"),  # crypto BASKET, not a coin
         "SKHYNIX/USDT:USDT": _market("SKHYNIX/USDT:USDT", "KR_EQUITY"),
         "BTCQ/USDT:USDT": _market("BTCQ/USDT:USDT", "COIN", "CURRENT_QUARTER"),  # coin quarterly
+        "PAXG/USDT:USDT": _coin_base("PAXG/USDT:USDT", "PAXG"),   # gold-proxy COIN -> excluded
         # GHOST/USDT:USDT is intentionally ABSENT from markets -> fail-closed
     }
 
@@ -85,8 +105,8 @@ def test_scan_universe_keeps_only_coin_perps_excludes_tradfi():
     syms = {r["symbol"] for r in scan_universe(_MixedClient(), top_n=20)}
     assert syms == {"BTC/USDT:USDT", "DOGE/USDT:USDT"}  # ONLY the COIN perps
     for x in ("XAU/USDT:USDT", "MU/USDT:USDT", "SPCX/USDT:USDT", "DEFI/USDT:USDT",
-              "SKHYNIX/USDT:USDT", "BTCQ/USDT:USDT", "GHOST/USDT:USDT"):
-        assert x not in syms  # TradFi / index / quarterly / absent-from-markets all excluded
+              "SKHYNIX/USDT:USDT", "BTCQ/USDT:USDT", "PAXG/USDT:USDT", "GHOST/USDT:USDT"):
+        assert x not in syms  # TradFi / index / quarterly / gold-proxy / absent all excluded
 
 MARKET = {
     "id": "BTCUSDT",

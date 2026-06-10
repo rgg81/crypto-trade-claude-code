@@ -64,12 +64,20 @@ def parse_symbol_spec(market: dict, tiers: list[dict]) -> SymbolSpec:
     )
 
 
+# Gold/commodity-PROXY tokens Binance tags underlyingType=='COIN' but which are economically a
+# commodity (a metal-backed claim), NOT a cryptocurrency. The desk trades crypto only, so these are
+# excluded despite the COIN tag (PAXG = PAX Gold, XAUT = Tether Gold). Keyed on the base asset.
+_COMMODITY_PROXY_BASES = frozenset({"PAXG", "XAUT"})
+
+
 def is_crypto_market(market: dict | None) -> bool:
     """CRYPTO-ONLY allowlist over a ccxt market dict (the one load_markets() populates). The desk
     trades cryptocurrencies ONLY. Binance now lists tokenized equities/commodities/metals/pre-IPO
     and crypto baskets as USDT perps (market.info.underlyingType in EQUITY / KR_EQUITY / COMMODITY
     / PREMARKET / INDEX); a CRYPTOCURRENCY is exactly underlyingType == 'COIN'. INDEX (BTCDOM/DEFI
-    baskets) is excluded too — a basket/dominance index is not a single coin.
+    baskets) is excluded too — a basket/dominance index is not a single coin. Gold-backed PROXY
+    coins (PAXG, XAUT — `_COMMODITY_PROXY_BASES`) are excluded as well: Binance tags them COIN but
+    they are economically a commodity claim, not a cryptocurrency.
 
     FAIL-CLOSED on missing / ambiguous metadata: a market we cannot PROVE is a coin is excluded
     (a real coin is just re-scouted next cycle; a TradFi instrument must NEVER leak in). The
@@ -82,6 +90,9 @@ def is_crypto_market(market: dict | None) -> bool:
         return False
     ct = str(info.get("contractType") or "").upper()
     if "TRADIFI" in ct or "QUARTER" in ct:     # TradFi perp / COIN-dated future != crypto perp
+        return False
+    base = str(market.get("base") or info.get("baseAsset") or "").strip().upper()
+    if base in _COMMODITY_PROXY_BASES:         # gold-proxy COIN (PAXG/XAUT) = commodity, not crypto
         return False
     return True
 
