@@ -760,8 +760,8 @@ def test_resolve_and_adapt_loosens_on_shadow_wins(tmp_path):
     from futures_fund.shadow import record_shadow
     state_dir = tmp_path / "s"
     record_shadow(state_dir, NOW, 0, _rr_vetoed_shorts(8))
-    changes = _resolve_and_adapt_rr_floor(             # short wins: bar low 94 <= tp 95
-        state_dir, lambda sym: [{"high": 100.5, "low": 94.0}], cycle_no=5)
+    changes = _resolve_and_adapt_rr_floor(             # short wins: forward bar low 94 <= tp 95
+        state_dir, lambda sym, after: [{"high": 100.5, "low": 94.0}], cycle_no=5)
     assert load_rr_floor(state_dir)["low_vol_range"] == 1.95
     assert changes and any("low_vol_range" in c for c in changes)
 
@@ -772,7 +772,33 @@ def test_resolve_pending_does_not_adapt(tmp_path):
     from futures_fund.shadow import record_shadow
     state_dir = tmp_path / "s"
     record_shadow(state_dir, NOW, 0, _rr_vetoed_shorts(8, tag="p"))
-    # bar touches neither tp 95 nor stop 101, and 1 bar < HORIZON -> pending -> no decided samples
+    # forward bar touches neither tp 95 nor stop 101, and 1 bar < HORIZON -> pending -> no samples
     changes = _resolve_and_adapt_rr_floor(
-        state_dir, lambda sym: [{"high": 100.5, "low": 99.0}], cycle_no=5)
+        state_dir, lambda sym, after: [{"high": 100.5, "low": 99.0}], cycle_no=5)
     assert load_rr_floor(state_dir)["low_vol_range"] == SEED and changes == []
+
+
+def test_resolve_failsafe_on_partial_ledger_entry(tmp_path):
+    # a hand-corrupted RR-veto ledger entry missing `symbol` must be SKIPPED, never crash the phase
+    from futures_fund.orchestration import _resolve_and_adapt_rr_floor
+    from futures_fund.rr_floor import SEED, load_rr_floor
+    from futures_fund.shadow import record_shadow
+    state_dir = tmp_path / "s"
+    record_shadow(state_dir, NOW, 0, [{"id": "0:x", "reason": "RR 1.70 < min 2.00",
+                                       "quadrant": "low_vol_range", "direction": "short",
+                                       "entry": 100.0, "stop": 101.0,
+                                       "take_profits": [95.0]}])   # NO "symbol" key
+    changes = _resolve_and_adapt_rr_floor(state_dir, lambda sym, after: [{"high": 1, "low": 1}], 5)
+    assert changes == [] and load_rr_floor(state_dir)["low_vol_range"] == SEED   # skipped, no throw
+
+
+def test_resolve_fresh_veto_no_forward_bars_is_pending(tmp_path):
+    # a veto with no forward bars yet (bars_for returns []) stays unscored -> no adaptation
+    from futures_fund.orchestration import _resolve_and_adapt_rr_floor
+    from futures_fund.rr_floor import SEED, load_rr_floor
+    from futures_fund.shadow import load_scored, record_shadow
+    state_dir = tmp_path / "s"
+    record_shadow(state_dir, NOW, 0, _rr_vetoed_shorts(8, tag="fresh"))
+    changes = _resolve_and_adapt_rr_floor(state_dir, lambda sym, after: [], cycle_no=5)
+    assert changes == [] and load_rr_floor(state_dir)["low_vol_range"] == SEED
+    assert load_scored(state_dir) == {}            # nothing resolved (no forward bars)

@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from futures_fund.baseline import propose, simple_regime
+from futures_fund.brief import last_completed_frame
 from futures_fund.config import Settings
 from futures_fund.consolidation import (
     cluster_scale,
@@ -164,8 +165,13 @@ def execute_proposals(  # noqa: PLR0912
         if spec is None:
             continue
         unified = ctx.raw_to_unified[prop.symbol]
-        regime = simple_regime(ctx.frames[unified])
-        rr_floor = effective_rr_floor(regime.quadrant, floor_state)
+        regime = simple_regime(ctx.frames[unified])   # GateInputs.regime (sizing/caps) — unchanged
+        # The RR-FLOOR quadrant must use the COMPLETED frame the trigger fires on, matching CP9's
+        # arm-time quadrant, so an adapted per-quadrant floor can't arm a trigger then RR-veto it.
+        _cdf = last_completed_frame(ctx.frames[unified], now, ctx.settings.timeframe)
+        floor_quadrant = (simple_regime(_cdf).quadrant
+                          if _cdf is not None and len(_cdf) else regime.quadrant)
+        rr_floor = effective_rr_floor(floor_quadrant, floor_state)
         decision = evaluate(GateInputs(proposal=prop, spec=spec, regime=regime,
                                        health=health, open_positions=open_dicts,
                                        daily_pnl_pct=daily_pnl, weekly_pnl_pct=weekly_pnl,
@@ -176,7 +182,7 @@ def execute_proposals(  # noqa: PLR0912
             vetoed.append({"symbol": prop.symbol, "direction": prop.direction,
                            "entry": prop.entry, "stop": prop.stop,
                            "take_profits": prop.take_profits, "reason": decision.reason,
-                           "quadrant": regime.quadrant,
+                           "quadrant": floor_quadrant,   # the quadrant the RR floor was judged on
                            "id": f"{cycle_no}:{prop.symbol}:{prop.direction}"})
 
     cvar_mult = cvar_risk_multiplier(_recent_returns(memory_dir, health.equity))

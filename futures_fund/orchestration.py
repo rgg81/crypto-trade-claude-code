@@ -448,11 +448,13 @@ def _proposal_to_stop_entry(p: dict, cycle_no: int):
 
 
 def _resolve_and_adapt_rr_floor(state_dir, bars_for, cycle_no: int) -> list:
-    """Score newly-resolvable RR-vetoed shadow entries (multi-bar first-touch over `bars_for`) into
-    the resolution cache, then adapt the per-quadrant RR floor from the trailing tally. Writes
-    state/shadow-scored.json and (only on a change) state/rr_floor.json. Returns the human-readable
-    floor-change strings (possibly empty). `bars_for(symbol) -> list[{high,low}]`; a symbol with no
-    bars this cycle is retried later. Only RR-veto entries carrying a quadrant+id are scored."""
+    """Score newly-resolvable RR-vetoed shadow entries (multi-bar first-touch over the bars AFTER
+    the veto) into the resolution cache, then adapt the per-quadrant RR floor from the trailing
+    tally. Writes state/shadow-scored.json and (only on a change) state/rr_floor.json. Returns the
+    human-readable floor-change strings (possibly empty). `bars_for(symbol, after_ts) ->
+    list[{high,low}]` returns the completed bars STRICTLY AFTER `after_ts` (the veto time), so a
+    same-cycle veto has no forward bars yet and stays pending until they accrue. Fail-safe: a
+    partial ledger entry (missing symbol/id/quadrant) is skipped, never thrown. RR-veto only."""
     from futures_fund.rr_floor import adapt_rr_floor, load_rr_floor, save_rr_floor
     from futures_fund.shadow import (
         load_scored,
@@ -464,18 +466,19 @@ def _resolve_and_adapt_rr_floor(state_dir, bars_for, cycle_no: int) -> list:
     scored = load_scored(state_dir)
     for e in shadow_ledger(state_dir):
         eid = e.get("id")
-        if (not eid or not str(e.get("reason", "")).startswith("RR")
+        sym = e.get("symbol")
+        if (not eid or not sym or not str(e.get("reason", "")).startswith("RR")
                 or e.get("quadrant") is None):
             continue
         if scored.get(eid, {}).get("outcome") in ("won", "lost", "expired"):
             continue   # terminal -> already counted
-        bars = bars_for(e["symbol"])
+        bars = bars_for(sym, e.get("ts"))     # bars STRICTLY AFTER the veto (forward first-touch)
         if not bars:
-            continue   # symbol absent this cycle -> retry later
+            continue   # no forward bars yet (fresh veto / symbol absent) -> retry later
         outcome = score_shadow_first_touch(e, bars)
         if outcome == "pending":
             continue
-        scored[eid] = {"outcome": outcome, "quadrant": e["quadrant"], "cycle": cycle_no}
+        scored[eid] = {"outcome": outcome, "quadrant": e.get("quadrant"), "cycle": cycle_no}
     save_scored(state_dir, scored)
     new_state, changes = adapt_rr_floor(load_rr_floor(state_dir),
                                         tally_resolutions(scored, trail_w=40), cycle_no)
@@ -1004,13 +1007,23 @@ def gate_execute_step(exchange, settings: Settings, state_dir, memory_dir,
         report.setdefault("warnings", []).extend(low_rr_actions)
     # REFLECT: score newly-resolvable RR-vetoed shadow trades against this cycle's frames and adapt
     # the per-quadrant RR floor (written for NEXT cycle). Every floor change is surfaced (Rule 6).
-    def _bars_for(symbol):
+    def _bars_for(symbol, after_ts):
+        # The completed bars STRICTLY AFTER the veto time `after_ts`, capped at the scoring horizon,
+        # so first-touch is the forward counterfactual (a fresh veto has 0 forward bars -> pending).
+        import pandas as pd
+
+        from futures_fund.shadow import HORIZON
         uni = ctx.raw_to_unified.get(symbol)
         df = last_completed_frame(ctx.frames.get(uni), now, settings.timeframe) if uni else None
         if df is None or not len(df):
             return []
-        tail = df.tail(24)
-        return [{"high": float(r.high), "low": float(r.low)} for r in tail.itertuples()]
+        if after_ts is not None:
+            try:
+                df = df[df["timestamp"] > pd.Timestamp(after_ts)]
+            except (ValueError, TypeError, KeyError):
+                return []
+        fwd = df.head(HORIZON)   # the first HORIZON completed bars after the veto
+        return [{"high": float(r.high), "low": float(r.low)} for r in fwd.itertuples()]
     rr_changes = _resolve_and_adapt_rr_floor(state_dir, _bars_for, cycle_no)
     report["rr_floor_changes"] = len(rr_changes)
     if rr_changes:
