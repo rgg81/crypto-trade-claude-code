@@ -729,3 +729,20 @@ def test_gate_force_closes_held_noncrypto_position(tmp_path):
     assert "XAUUSDT" not in {p.symbol for p in load_positions(state_dir)}  # force-closed by the gate
     assert report["auto_retired_noncrypto"] >= 1
     assert any("NON-CRYPTO" in w for w in report.get("warnings", []))
+
+
+def test_cp9_uses_adaptive_floor(tmp_path):
+    # with the quadrant floor learned to 1.6, a RR-1.7 stop_entry is ARMED (the 2.0 constant refused
+    # it — see test_gate_refuses_sub_rr_trigger_at_arm_keeps_clean_one). Proves CP9 reads the floor.
+    from futures_fund.rr_floor import QUADRANTS, save_rr_floor
+    state_dir, memory_dir = tmp_path / "s", tmp_path / "m"
+    ex = FakeExchange({"BTC/USDT:USDT": _uptrend()})
+    last = _pf(state_dir, memory_dir, ex)["briefs"][0]["last_close"]
+    save_rr_floor(state_dir, {q: 1.6 for q in QUADRANTS} | {"updated_cycle": 1})  # floors -> 1.6
+    report = gate_execute_step(
+        ex, _settings(), state_dir, memory_dir, now=NOW, cycle_no=2, proposals=[],
+        regime_state=_regime("risk_off"),
+        triggers=[{"symbol": "BTCUSDT", "direction": "short", "kind": "stop_entry",
+                   "trigger_level": last - 1.0, "stop": last,             # risk 1.0
+                   "take_profits": [last - 2.7], "atr": 1.0}])            # reward 1.7 -> RR 1.7
+    assert report["triggers_refused_low_rr"] == 0 and report["triggers_armed"] == 1

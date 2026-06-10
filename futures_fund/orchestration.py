@@ -564,7 +564,6 @@ def gate_execute_step(exchange, settings: Settings, state_dir, memory_dir,
         check_pending_orders,
         fired_to_proposal,
         load_pending_orders,
-        low_rr_triggers,
         non_crypto_triggers,
         revalidate_triggers,
         save_pending_orders,
@@ -714,6 +713,7 @@ def gate_execute_step(exchange, settings: Settings, state_dir, memory_dir,
     # has crossed PAST its level (the cy43 ETH inversion). Computed over completed bars (forming row
     # already dropped). A feed gap -> no entry -> fail-safe (no stamp, no auto-cancel).
     swings_by_symbol: dict = {}
+    quadrant_by_symbol: dict = {}   # raw symbol -> simple_regime quadrant (for adaptive RR floor)
     for raw, uni in ctx.raw_to_unified.items():
         # A stop_entry/limit_entry must fire off the latest COMPLETED 4h bar — NOT the still-forming
         # candle the OHLCV feed returns as iloc[-1] (its transient close flips on every tick). Drop
@@ -729,6 +729,11 @@ def gate_execute_step(exchange, settings: Settings, state_dir, memory_dir,
             pass
         if raw in oi_gate_syms:   # completed-bar OI aligned to the same `now` the bar was read at
             oi_change_by_symbol[raw] = oi_change_for(exchange, uni, settings.timeframe, now)
+        try:
+            from futures_fund.baseline import simple_regime
+            quadrant_by_symbol[raw] = simple_regime(df).quadrant
+        except Exception:  # noqa: BLE001 — feed gap -> no quadrant -> floor defaults to SEED below
+            pass
         try:
             sh, sl = swing_levels(df)
             swings_by_symbol[raw] = (float(sh), float(sl))
@@ -910,22 +915,32 @@ def gate_execute_step(exchange, settings: Settings, state_dir, memory_dir,
                 noncrypto_actions.append(
                     f"blocked NON-CRYPTO arm {o.direction} {o.kind} {o.symbol} "
                     f"— desk is crypto-only")
-    # CP9 ARM-TIME RR-FLOOR guard: never arm a stop_entry whose RR is below the gate's MIN_RR. A
-    # fired stop_entry fills at its trigger (entry == trigger_level), so the RR is FIXED from arm to
-    # fire — a sub-floor trigger would only fire then get RR-vetoed (cy68 HYPE 1.84 / SOL 1.64 both
-    # fired and were vetoed) = a wasted arm + a false 'positioned' signal. Refuse it now, using the
-    # gate's EXACT condition, so the team gets immediate feedback to re-spec to clear 2.0 or stand
-    # aside. Refuse-only: never opens/sizes anything; symmetric long/short.
+    # CP9 ARM-TIME RR-FLOOR guard (regime-adaptive): never arm a stop_entry whose RR is below the
+    # gate's effective floor for that symbol's regime quadrant. A fired stop_entry fills at its
+    # trigger (entry == trigger_level), so the RR is FIXED from arm to fire — a sub-floor trigger
+    # would only fire then get RR-vetoed (cy68 HYPE 1.84 / SOL 1.64 both fired and were vetoed) = a
+    # wasted arm + a false 'positioned' signal. Use the SAME per-quadrant floor the gate will apply
+    # at fire so arm/fire agree. Refuse-only: never opens/sizes anything; symmetric long/short.
     if new_triggers:
         from futures_fund.risk_gate import _RR_EPS, MIN_RR
-        low_rr, kept_rr = low_rr_triggers(new_triggers, MIN_RR, _RR_EPS)
+        from futures_fund.rr_floor import effective_rr_floor, load_rr_floor
+        floor_state = load_rr_floor(state_dir)
+        kept_rr, low_rr = [], []
+        for o in new_triggers:
+            q = quadrant_by_symbol.get(o.symbol)
+            floor = effective_rr_floor(q, floor_state) if q else MIN_RR
+            checkable = (o.kind == "stop_entry" and o.trigger_level is not None
+                         and o.stop is not None and bool(o.take_profits))
+            (low_rr if (checkable and trigger_rr(o) < floor - _RR_EPS) else kept_rr).append(o)
         if low_rr:
             new_triggers = kept_rr
             triggers_refused_low_rr += len(low_rr)
             for o in low_rr:
+                q = quadrant_by_symbol.get(o.symbol)
+                floor = effective_rr_floor(q, floor_state) if q else MIN_RR
                 low_rr_actions.append(
                     f"refused LOW-RR arm {o.direction} {o.kind} {o.symbol} @ {o.trigger_level} — "
-                    f"RR {trigger_rr(o):.2f} < gate floor {MIN_RR}; re-spec or stand aside")
+                    f"RR {trigger_rr(o):.2f} < floor {floor:.2f}; re-spec or stand aside")
     save_pending_orders(state_dir, upsert_triggers(remaining, new_triggers))
     if isinstance(regime_state, dict):
         try:
