@@ -102,3 +102,28 @@ def test_hostile_rr_floor_file_clamps_up_to_hard_min(tmp_path):
     assert effective_rr_floor("high_vol_trend", st) == 1.6  # -5.0 -> 1.6
     assert effective_rr_floor("low_vol_trend", st) == 2.0   # NaN -> SEED (load fail-safe)
     assert effective_rr_floor("high_vol_range", st) == 2.0  # "junk" -> SEED
+
+
+def test_adapt_pins_at_floor_after_consecutive_pushes():
+    # a quadrant already AT the 1.6 floor that keeps wanting looser (w>0.60) is PINNED; after
+    # PIN_ALERT consecutive pushes a 'PINNED' advisory is surfaced (regime model / loop may be off).
+    from futures_fund.rr_floor import PIN_ALERT
+    st = _seed_state() | {"low_vol_range": 1.6}
+    last = []
+    for c in range(1, PIN_ALERT + 1):
+        st, last = adapt_rr_floor(st, {"low_vol_range": (8, 0)}, c)   # w=1.0, clamped at 1.6
+    assert st["low_vol_range"] == 1.6 and st["pins"]["low_vol_range"] == PIN_ALERT
+    assert any("PINNED" in c and "low_vol_range" in c for c in last)
+
+
+def test_adapt_no_pin_while_still_moving():
+    st = _seed_state()                                              # 2.0, not a bound
+    st, changes = adapt_rr_floor(st, {"low_vol_range": (8, 0)}, 1)  # moves 2.0 -> 1.95
+    assert st["low_vol_range"] == 1.95 and st.get("pins", {}).get("low_vol_range", 0) == 0
+    assert not any("PINNED" in c for c in changes)
+
+
+def test_adapt_pin_resets_on_deadband():
+    st = _seed_state() | {"low_vol_range": 1.6, "pins": {"low_vol_range": 4}}
+    st, _ = adapt_rr_floor(st, {"low_vol_range": (5, 5)}, 10)       # w=0.5 dead-band -> reset
+    assert st.get("pins", {}).get("low_vol_range", 0) == 0

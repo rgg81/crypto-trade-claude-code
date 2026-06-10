@@ -480,9 +480,9 @@ def _resolve_and_adapt_rr_floor(state_dir, bars_for, cycle_no: int) -> list:
             continue
         scored[eid] = {"outcome": outcome, "quadrant": e.get("quadrant"), "cycle": cycle_no}
     save_scored(state_dir, scored)
-    new_state, changes = adapt_rr_floor(load_rr_floor(state_dir),
-                                        tally_resolutions(scored, trail_w=40), cycle_no)
-    if changes:
+    old_state = load_rr_floor(state_dir)
+    new_state, changes = adapt_rr_floor(old_state, tally_resolutions(scored, trail_w=40), cycle_no)
+    if new_state != old_state:   # persist floor moves AND pin-counter updates (advisory)
         save_rr_floor(state_dir, new_state)
     return changes
 
