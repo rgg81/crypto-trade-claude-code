@@ -447,6 +447,43 @@ def _proposal_to_stop_entry(p: dict, cycle_no: int):
         created_cycle=cycle_no, expires_cycle=cycle_no + 2)
 
 
+def _resolve_and_adapt_rr_floor(state_dir, bars_for, cycle_no: int) -> list:
+    """Score newly-resolvable RR-vetoed shadow entries (multi-bar first-touch over `bars_for`) into
+    the resolution cache, then adapt the per-quadrant RR floor from the trailing tally. Writes
+    state/shadow-scored.json and (only on a change) state/rr_floor.json. Returns the human-readable
+    floor-change strings (possibly empty). `bars_for(symbol) -> list[{high,low}]`; a symbol with no
+    bars this cycle is retried later. Only RR-veto entries carrying a quadrant+id are scored."""
+    from futures_fund.rr_floor import adapt_rr_floor, load_rr_floor, save_rr_floor
+    from futures_fund.shadow import (
+        load_scored,
+        save_scored,
+        score_shadow_first_touch,
+        shadow_ledger,
+        tally_resolutions,
+    )
+    scored = load_scored(state_dir)
+    for e in shadow_ledger(state_dir):
+        eid = e.get("id")
+        if (not eid or not str(e.get("reason", "")).startswith("RR")
+                or e.get("quadrant") is None):
+            continue
+        if scored.get(eid, {}).get("outcome") in ("won", "lost", "expired"):
+            continue   # terminal -> already counted
+        bars = bars_for(e["symbol"])
+        if not bars:
+            continue   # symbol absent this cycle -> retry later
+        outcome = score_shadow_first_touch(e, bars)
+        if outcome == "pending":
+            continue
+        scored[eid] = {"outcome": outcome, "quadrant": e["quadrant"], "cycle": cycle_no}
+    save_scored(state_dir, scored)
+    new_state, changes = adapt_rr_floor(load_rr_floor(state_dir),
+                                        tally_resolutions(scored, trail_w=40), cycle_no)
+    if changes:
+        save_rr_floor(state_dir, new_state)
+    return changes
+
+
 def _stamp_anchor_swing(po, swings_by_symbol: dict):
     """Stamp a breakout/breakdown stop_entry's ARM-TIME directional swing (swing_low for a short,
     swing_high for a long) so a later cycle can auto-cancel it once the swing crosses past it.
@@ -965,6 +1002,20 @@ def gate_execute_step(exchange, settings: Settings, state_dir, memory_dir,
     if low_rr_actions:                               # surface each (Rule 6): re-spec or stand aside
         report.setdefault("actions", []).extend(low_rr_actions)
         report.setdefault("warnings", []).extend(low_rr_actions)
+    # REFLECT: score newly-resolvable RR-vetoed shadow trades against this cycle's frames and adapt
+    # the per-quadrant RR floor (written for NEXT cycle). Every floor change is surfaced (Rule 6).
+    def _bars_for(symbol):
+        uni = ctx.raw_to_unified.get(symbol)
+        df = last_completed_frame(ctx.frames.get(uni), now, settings.timeframe) if uni else None
+        if df is None or not len(df):
+            return []
+        tail = df.tail(24)
+        return [{"high": float(r.high), "low": float(r.low)} for r in tail.itertuples()]
+    rr_changes = _resolve_and_adapt_rr_floor(state_dir, _bars_for, cycle_no)
+    report["rr_floor_changes"] = len(rr_changes)
+    if rr_changes:
+        report.setdefault("actions", []).extend(rr_changes)
+        report.setdefault("warnings", []).extend(rr_changes)
     # symmetric telemetry replacing dropped_short_regime: how many fresh entries went to market vs
     # were converted to a counter-regime confirmation trigger (operator can see the routing split).
     report["market_entries"] = len(market_fresh)
