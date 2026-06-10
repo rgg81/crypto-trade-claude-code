@@ -477,6 +477,34 @@ def test_gate_auto_cancels_stale_unfired_short(tmp_path):
     assert any("auto-canceled STALE" in a for a in report.get("warnings", []))
 
 
+def test_gate_refuses_sub_rr_trigger_at_arm_keeps_clean_one(tmp_path):
+    # CP9 arm-time RR-floor guard (cy68): a stop_entry armed below the gate's MIN_RR=2.0 would only
+    # fire then RR-veto (entry==trigger ⇒ RR fixed), so it is REFUSED at arm — never written to the
+    # store. A clean >=2.0 trigger on a distinct key is armed normally. Refuse-only, never opens.
+    state_dir, memory_dir = tmp_path / "s", tmp_path / "m"
+    ex = FakeExchange({"BTC/USDT:USDT": _uptrend()})
+    last = _pf(state_dir, memory_dir, ex)["briefs"][0]["last_close"]
+    report = gate_execute_step(
+        ex, _settings(), state_dir, memory_dir, now=NOW, cycle_no=1, proposals=[],
+        regime_state=_regime("risk_off"),
+        triggers=[
+            # short, RR = 7/5 = 1.4 < 2.0 -> refused
+            {"symbol": "BTCUSDT", "direction": "short", "kind": "stop_entry",
+             "trigger_level": last - 25.0, "stop": last - 20.0,
+             "take_profits": [last - 32.0], "atr": 2.0},
+            # long (distinct key), RR = 15/3 = 5.0 >= 2.0 -> armed
+            {"symbol": "BTCUSDT", "direction": "long", "kind": "stop_entry",
+             "trigger_level": last + 25.0, "stop": last + 22.0,
+             "take_profits": [last + 40.0], "atr": 2.0},
+        ])
+    assert report["triggers_refused_low_rr"] == 1
+    assert report["triggers_armed"] == 1                 # only the clean >=2.0 trigger
+    stored = load_pending_orders(state_dir)
+    assert {o.direction for o in stored} == {"long"}     # the sub-RR short was NOT persisted
+    assert report["opened"] == 0                         # refuse-only, nothing opened
+    assert any("refused LOW-RR" in a for a in report.get("warnings", []))
+
+
 def test_gate_keeps_unstamped_trigger_and_does_not_autocancel(tmp_path):
     # an UNSTAMPED prior trigger (no arm-time anchor) is never auto-canceled, even with swing_low
     # below it: a non-firing short stays armed (proves stamping is REQUIRED to retire a trigger).
@@ -500,7 +528,7 @@ def test_gate_stamps_anchor_swing_on_new_stop_entry(tmp_path):
         ex, _settings(), state_dir, memory_dir, now=NOW, cycle_no=1, proposals=[],
         regime_state=_regime("risk_off"),
         triggers=[{"symbol": "BTCUSDT", "direction": "short", "kind": "stop_entry",
-                   "trigger_level": last - 25.0, "stop": last - 15.0,
+                   "trigger_level": last - 25.0, "stop": last - 20.0,   # RR 15/5=3.0 clears floor
                    "take_profits": [last - 40.0], "atr": 2.0}])
     stored = load_pending_orders(state_dir)
     assert len(stored) == 1 and stored[0].anchor_swing is not None
@@ -617,8 +645,9 @@ def test_gate_never_arms_noncrypto_trigger(tmp_path):
                              {"BTCUSDT": "BTC/USDT:USDT", "XAUUSDT": "XAU/USDT:USDT"})
     last = _pf(state_dir, memory_dir, ex)["briefs"][0]["last_close"]
     triggers = [
+        # clean RR=50/6 long (stop just below trigger) clears the CP9 RR floor, isolates CP7
         {"symbol": "BTCUSDT", "direction": "long", "kind": "stop_entry", "trigger_level": last + 50.0,
-         "stop": last - 8.0, "take_profits": [last + 100.0], "atr": 2.0, "expires_cycle": 9},
+         "stop": last + 44.0, "take_profits": [last + 100.0], "atr": 2.0, "expires_cycle": 9},
         {"symbol": "XAUUSDT", "direction": "short", "kind": "stop_entry", "trigger_level": 4264.0,
          "stop": 4288.0, "take_profits": [4205.0], "atr": 25.0, "expires_cycle": 9},
         {"symbol": "XAUUSDT", "direction": "long", "kind": "stop_entry", "trigger_level": 4400.0,

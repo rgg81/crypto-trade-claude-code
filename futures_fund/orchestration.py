@@ -564,9 +564,11 @@ def gate_execute_step(exchange, settings: Settings, state_dir, memory_dir,
         check_pending_orders,
         fired_to_proposal,
         load_pending_orders,
+        low_rr_triggers,
         non_crypto_triggers,
         revalidate_triggers,
         save_pending_orders,
+        trigger_rr,
         upsert_triggers,
     )
     from futures_fund.state import is_halted
@@ -601,6 +603,8 @@ def gate_execute_step(exchange, settings: Settings, state_dir, memory_dir,
     _is_crypto_raw = getattr(exchange, "is_crypto_raw", None)
     auto_retired_noncrypto = 0
     noncrypto_actions: list = []
+    triggers_refused_low_rr = 0
+    low_rr_actions: list = []
 
     def _noncrypto(raw: str) -> bool:  # True iff the gate must REFUSE this symbol (fail-closed)
         return _is_crypto_raw is not None and not _is_crypto_raw(raw)
@@ -906,6 +910,22 @@ def gate_execute_step(exchange, settings: Settings, state_dir, memory_dir,
                 noncrypto_actions.append(
                     f"blocked NON-CRYPTO arm {o.direction} {o.kind} {o.symbol} "
                     f"— desk is crypto-only")
+    # CP9 ARM-TIME RR-FLOOR guard: never arm a stop_entry whose RR is below the gate's MIN_RR. A
+    # fired stop_entry fills at its trigger (entry == trigger_level), so the RR is FIXED from arm to
+    # fire — a sub-floor trigger would only fire then get RR-vetoed (cy68 HYPE 1.84 / SOL 1.64 both
+    # fired and were vetoed) = a wasted arm + a false 'positioned' signal. Refuse it now, using the
+    # gate's EXACT condition, so the team gets immediate feedback to re-spec to clear 2.0 or stand
+    # aside. Refuse-only: never opens/sizes anything; symmetric long/short.
+    if new_triggers:
+        from futures_fund.risk_gate import _RR_EPS, MIN_RR
+        low_rr, kept_rr = low_rr_triggers(new_triggers, MIN_RR, _RR_EPS)
+        if low_rr:
+            new_triggers = kept_rr
+            triggers_refused_low_rr += len(low_rr)
+            for o in low_rr:
+                low_rr_actions.append(
+                    f"refused LOW-RR arm {o.direction} {o.kind} {o.symbol} @ {o.trigger_level} — "
+                    f"RR {trigger_rr(o):.2f} < gate floor {MIN_RR}; re-spec or stand aside")
     save_pending_orders(state_dir, upsert_triggers(remaining, new_triggers))
     if isinstance(regime_state, dict):
         try:
@@ -926,6 +946,10 @@ def gate_execute_step(exchange, settings: Settings, state_dir, memory_dir,
     if noncrypto_actions:                            # surface each (Rule 6) — desk is crypto-only
         report.setdefault("actions", []).extend(noncrypto_actions)
         report.setdefault("warnings", []).extend(noncrypto_actions)
+    report["triggers_refused_low_rr"] = triggers_refused_low_rr  # sub-MIN_RR arms refused
+    if low_rr_actions:                               # surface each (Rule 6): re-spec or stand aside
+        report.setdefault("actions", []).extend(low_rr_actions)
+        report.setdefault("warnings", []).extend(low_rr_actions)
     # symmetric telemetry replacing dropped_short_regime: how many fresh entries went to market vs
     # were converted to a counter-regime confirmation trigger (operator can see the routing split).
     report["market_entries"] = len(market_fresh)

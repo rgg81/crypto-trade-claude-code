@@ -8,9 +8,11 @@ from futures_fund.pending_orders import (
     check_pending_orders,
     fired_to_proposal,
     load_pending_orders,
+    low_rr_triggers,
     non_crypto_triggers,
     revalidate_triggers,
     save_pending_orders,
+    trigger_rr,
     upsert_triggers,
 )
 
@@ -103,6 +105,36 @@ def test_corrupt_store_returns_empty(tmp_path):
 def test_missing_store_cold_start_empty(tmp_path):
     assert load_pending_orders(tmp_path) == []
     assert check_pending_orders(tmp_path, {"BTCUSDT": {"close": 1}}, 5) == ([], [], [])
+
+
+def test_trigger_rr_matches_gate_formula():
+    # RR the gate scores at fire time: |nearest_TP - trigger| / |stop - trigger| (entry==trigger for
+    # a fired stop_entry, fixed from arm to fire). cy68 HYPE 56.40/58.30/52.90 = 3.50/1.90 = 1.84.
+    rr = trigger_rr(_o(direction="short", trigger=56.40, stop=58.30, tps=[52.90]))
+    assert round(rr, 2) == 1.84
+    assert trigger_rr(_o(direction="long", trigger=100.0, stop=95.0, tps=[115.0])) == 3.0   # 15/5
+    # NEAREST tp is used (not the deepest)
+    assert trigger_rr(_o(direction="long", trigger=100.0, stop=95.0, tps=[102.0, 130.0])) == 0.4
+    # degenerate -> 0.0 (zero risk / no tp) = below any positive floor
+    assert trigger_rr(_o(direction="short", trigger=100.0, stop=100.0, tps=[90.0])) == 0.0
+    assert trigger_rr(_o(direction="short", trigger=100.0, stop=105.0, tps=[])) == 0.0
+
+
+def _se(sym, direction, trigger, stop, tps, kind="stop_entry"):
+    return _o(symbol=sym, direction=direction, kind=kind, trigger=trigger, stop=stop, tps=tps)
+
+
+def test_low_rr_triggers_partitions_below_the_floor():
+    # Pre-arm guard: a stop_entry whose arm-time RR is below the gate's MIN_RR floor is refused (it
+    # would only fire then RR-veto). >= floor passes; an exactly-2.0 passes; a limit_entry is never
+    # checked here. Sub-floor: HYPE 1.84. OK: BTC 12/4=3.0, ETH 10/5=2.0, XRP limit (0.2 but limit).
+    hype = _se("HYPEUSDT", "short", 56.40, 58.30, [52.90])     # 1.84
+    clean = _se("BTCUSDT", "short", 100.0, 104.0, [88.0])      # 3.0
+    exactly2 = _se("ETHUSDT", "long", 100.0, 95.0, [110.0])    # 2.0
+    limit = _se("XRPUSDT", "long", 100.0, 95.0, [101.0], kind="limit_entry")  # 0.2 but limit=pass
+    sub, ok = low_rr_triggers([hype, clean, exactly2, limit], 2.0, 1e-6)
+    assert {o.symbol for o in sub} == {"HYPEUSDT"}
+    assert {o.symbol for o in ok} == {"BTCUSDT", "ETHUSDT", "XRPUSDT"}
 
 
 def test_upsert_replaces_by_symbol_dir_kind(tmp_path):

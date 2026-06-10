@@ -172,6 +172,42 @@ def revalidate_triggers(orders: list[PendingOrder],
     return stale, healthy
 
 
+def trigger_rr(o: PendingOrder) -> float:
+    """Reward:risk a stop_entry will be scored on by the gate AT FIRE TIME:
+    |nearest_TP − trigger_level| / |stop − trigger_level|. A fired stop_entry fills at its
+    trigger_level (entry == trigger), so this RR is FIXED from arm-time to fire-time: a trigger
+    armed below the gate's MIN_RR floor is deterministically doomed to fire-then-veto. Mirrors
+    risk_gate._reward_risk (nearest TP to entry). Returns 0.0 on missing TP / zero-or-undefined risk
+    (a degenerate trigger reads as below any positive floor). Direction-agnostic."""
+    lvl = o.trigger_level
+    tps = o.take_profits or []
+    if lvl is None or not math.isfinite(lvl) or not tps:
+        return 0.0
+    if o.stop is None or not math.isfinite(o.stop):
+        return 0.0
+    risk = abs(o.stop - lvl)
+    if risk <= 0:
+        return 0.0
+    nearest = min(tps, key=lambda tp: abs(tp - lvl))
+    return abs(nearest - lvl) / risk
+
+
+def low_rr_triggers(orders: list[PendingOrder], min_rr: float,
+                    eps: float = 1e-6) -> tuple[list, list]:
+    """Partition armed orders into (sub_floor, ok) by whether a stop_entry's arm-time RR clears the
+    gate's `min_rr` (using the gate's exact `rr < min_rr − eps` condition). ONLY a stop_entry with a
+    stop + at least one TP is checked; a limit_entry / missing-data order always passes (the gate
+    scores it on fire). A sub-floor stop_entry would only fire then be RR-vetoed (entry == trigger ⇒
+    RR fixed), so it is refused at arm-time — a refuse-only guard that never opens/sizes anything.
+    Pure and DIRECTION-AGNOSTIC (long/short symmetric)."""
+    sub, ok = [], []
+    for o in orders:
+        checkable = (o.kind == "stop_entry" and o.trigger_level is not None
+                     and o.stop is not None and bool(o.take_profits))
+        (sub if (checkable and trigger_rr(o) < min_rr - eps) else ok).append(o)
+    return sub, ok
+
+
 def non_crypto_triggers(orders: list[PendingOrder],
                         is_crypto_by_symbol: dict) -> tuple[list, list]:
     """Partition armed orders into (untradeable, tradeable) by whether the symbol is a CRYPTO
