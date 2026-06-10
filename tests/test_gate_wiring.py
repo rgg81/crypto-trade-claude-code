@@ -802,3 +802,33 @@ def test_resolve_fresh_veto_no_forward_bars_is_pending(tmp_path):
     changes = _resolve_and_adapt_rr_floor(state_dir, lambda sym, after: [], cycle_no=5)
     assert changes == [] and load_rr_floor(state_dir)["low_vol_range"] == SEED
     assert load_scored(state_dir) == {}            # nothing resolved (no forward bars)
+
+
+def _flat_then_spike(n=60):
+    # 59 flat bars (low_vol_range) + 1 spike last bar -> FORMING frame flips to high_vol_trend
+    import numpy as np
+    import pandas as pd
+    closes = np.full(n, 100.0) + np.random.default_rng(0).normal(0, 0.02, n)
+    closes[-1] = 112.0
+    return pd.DataFrame({
+        "timestamp": pd.date_range("2026-01-01", periods=n, freq="4h", tz="UTC"),
+        "open": closes, "high": closes + 0.2, "low": closes - 0.2, "close": closes, "volume": 1.0})
+
+
+def test_gate_floor_quadrant_uses_completed_frame_not_forming(tmp_path):
+    # Defect-1 guard: with `now` INSIDE the last (forming) bar's window, the gate must derive the
+    # RR-floor quadrant from the COMPLETED frame (matching CP9 / how triggers fire), NOT the forming
+    # frame. A low-RR proposal is vetoed; its shadow entry must carry the completed quadrant.
+    from futures_fund.shadow import shadow_ledger
+    state_dir, memory_dir = tmp_path / "s", tmp_path / "m"
+    ex = FakeExchange({"BTC/USDT:USDT": _flat_then_spike()})
+    now_forming = dt.datetime(2026, 1, 10, 22, 0, tzinfo=UTC)   # inside the spike bar's 4h window
+    preflight_step(ex, _settings(), state_dir, memory_dir, now=now_forming, cycle_no=1,
+                   http_client=_HttpClient())
+    prop = AgentProposal(symbol="BTCUSDT", direction="long", entry=100.0, stop=96.0,
+                         take_profits=[104.0], atr=2.0, confidence=0.7,   # RR=4/4=1.0
+                         rationale="x").model_dump()
+    gate_execute_step(ex, _settings(), state_dir, memory_dir, now=now_forming, cycle_no=1,
+                      proposals=[prop], regime_state=_regime("risk_on"))
+    led = [e for e in shadow_ledger(state_dir) if str(e.get("reason", "")).startswith("RR")]
+    assert led and led[0]["quadrant"] == "low_vol_range"   # COMPLETED frame, not forming
