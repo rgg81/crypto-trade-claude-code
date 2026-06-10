@@ -85,3 +85,20 @@ def test_integration_floor_gates_then_admits():
         st, _ = adapt_rr_floor(st, {"low_vol_range": (8, 0)}, c)
     assert effective_rr_floor("low_vol_range", st) == 1.6           # clamped at the hard floor
     assert effective_rr_floor("high_vol_trend", st) == 2.0          # other quadrants untouched
+
+
+def test_hostile_rr_floor_file_clamps_up_to_hard_min(tmp_path):
+    # END-TO-END: a hand-corrupt/hostile rr_floor.json can ONLY RAISE the floor — every quadrant a
+    # caller reads via load_rr_floor->effective_rr_floor is clamped up to the 1.6 hard floor, never
+    # below. (With test_gate_hard_min_wraps_corrupt_floor, the full file->gate chain holds.)
+    import json
+    (tmp_path / "rr_floor.json").write_text(
+        json.dumps({"low_vol_range": 0.1, "high_vol_trend": -5.0,
+                    "low_vol_trend": float("nan"), "high_vol_range": "junk"}))
+    st = load_rr_floor(tmp_path)
+    for q in QUADRANTS:
+        assert effective_rr_floor(q, st) >= 1.6           # nothing below the hard floor
+    assert effective_rr_floor("low_vol_range", st) == 1.6  # 0.1 -> 1.6
+    assert effective_rr_floor("high_vol_trend", st) == 1.6  # -5.0 -> 1.6
+    assert effective_rr_floor("low_vol_trend", st) == 2.0   # NaN -> SEED (load fail-safe)
+    assert effective_rr_floor("high_vol_range", st) == 2.0  # "junk" -> SEED
