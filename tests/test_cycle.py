@@ -106,3 +106,21 @@ def test_halt_flag_skips_trading(tmp_path):
     assert report["halted"] is True
     assert report["opened"] == 0
     assert load_positions(state_dir) == []
+
+
+def test_vetoed_shadow_entry_carries_quadrant_and_id(tmp_path):
+    # a baseline long vetoed (huge min_notional) records a shadow entry stamped with quadrant + id
+    from futures_fund.shadow import shadow_ledger
+
+    class _HugeMin(FakeExchange):
+        def symbol_spec(self, symbol):
+            return super().symbol_spec(symbol).model_copy(update={"min_notional": 1e12})
+
+    state_dir, memory_dir = tmp_path / "state", tmp_path / "memory"
+    ex = _HugeMin({"BTC/USDT:USDT": _uptrend()})
+    run_cycle(ex, _settings(), state_dir, memory_dir,
+              now=datetime(2026, 3, 1, tzinfo=UTC), cycle_no=1)
+    led = shadow_ledger(state_dir)
+    assert led, "expected a vetoed shadow entry"
+    assert "quadrant" in led[0] and "id" in led[0]
+    assert led[0]["id"].startswith("1:")              # cycle_no 1

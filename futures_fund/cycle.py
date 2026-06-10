@@ -22,6 +22,7 @@ from futures_fund.models import TradeProposal
 from futures_fund.policy import caps_for, circuit_breaker
 from futures_fund.portfolio import portfolio_health
 from futures_fund.risk_gate import GateInputs, evaluate
+from futures_fund.rr_floor import effective_rr_floor, load_rr_floor
 from futures_fund.state import (
     AccountState,
     Position,
@@ -157,22 +158,26 @@ def execute_proposals(  # noqa: PLR0912
 
     approved = []
     vetoed: list = []
+    floor_state = load_rr_floor(state_dir)   # per-quadrant adaptive RR floor (seed 2.0 = legacy)
     for prop in proposals:
         spec = ctx.specs_by_raw.get(prop.symbol)
         if spec is None:
             continue
         unified = ctx.raw_to_unified[prop.symbol]
-        decision = evaluate(GateInputs(proposal=prop, spec=spec,
-                                       regime=simple_regime(ctx.frames[unified]),
+        regime = simple_regime(ctx.frames[unified])
+        rr_floor = effective_rr_floor(regime.quadrant, floor_state)
+        decision = evaluate(GateInputs(proposal=prop, spec=spec, regime=regime,
                                        health=health, open_positions=open_dicts,
                                        daily_pnl_pct=daily_pnl, weekly_pnl_pct=weekly_pnl,
-                                       monthly_pnl_pct=monthly_pnl))
+                                       monthly_pnl_pct=monthly_pnl, rr_floor=rr_floor))
         if decision.verdict in ("approve", "resize") and decision.sized_trade is not None:
             approved.append(decision.sized_trade)
         else:
             vetoed.append({"symbol": prop.symbol, "direction": prop.direction,
                            "entry": prop.entry, "stop": prop.stop,
-                           "take_profits": prop.take_profits, "reason": decision.reason})
+                           "take_profits": prop.take_profits, "reason": decision.reason,
+                           "quadrant": regime.quadrant,
+                           "id": f"{cycle_no}:{prop.symbol}:{prop.direction}"})
 
     cvar_mult = cvar_risk_multiplier(_recent_returns(memory_dir, health.equity))
     force_close = set(force_close or set())
