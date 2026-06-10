@@ -75,3 +75,13 @@ def test_adapt_clamps_at_bounds():
     st2 = _seed_state() | {"high_vol_trend": 2.5}
     new2, _ = adapt_rr_floor(st2, {"high_vol_trend": (0, 8)}, cycle_no=15)  # 2.6 -> clamp 2.5
     assert new2["high_vol_trend"] == 2.5
+
+
+def test_integration_floor_gates_then_admits():
+    # seed gates a 1.7-RR trade; after a quadrant learns down to 1.6 over winning samples it admits.
+    st = {q: SEED for q in QUADRANTS} | {"updated_cycle": 0}
+    assert effective_rr_floor("low_vol_range", st) == 2.0           # seed: a 1.7 trade is vetoed
+    for c in range(1, 12):                                          # 8/0 won each cycle -> loosen
+        st, _ = adapt_rr_floor(st, {"low_vol_range": (8, 0)}, c)
+    assert effective_rr_floor("low_vol_range", st) == 1.6           # clamped at the hard floor
+    assert effective_rr_floor("high_vol_trend", st) == 2.0          # other quadrants untouched
