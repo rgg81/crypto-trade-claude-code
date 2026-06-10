@@ -426,10 +426,12 @@ def _armed(direction, trigger, stop, tps, atr=2.0, anchor=None, kind="stop_entry
                         created_cycle=0, expires_cycle=9)
 
 
-def test_gate_auto_cancels_stale_short_even_when_it_would_fire(tmp_path):
-    # short armed as a breakdown (anchor above the level); the 20-bar swing_low has since fallen far
-    # below it (uptrend swing_low ~131). The bar CLOSE is below the level (it WOULD fire) — but is
-    # geometrically stale, so it is dropped from `fired` (never opened) AND from the store.
+def test_gate_does_not_stale_cancel_a_fired_short(tmp_path):
+    # cy66 BCH faithfulness: a short whose 20-bar swing_low has drifted below the trigger is
+    # geometrically "stale" — BUT it FIRES this bar (close < trigger), i.e. price traded through the
+    # level, which a LIVE resting sell-stop would have FILLED. A fired trigger reproduces that live
+    # fill and must NOT be auto-canceled; only UN-FIRED drifted triggers are retired. (Synthetic
+    # fixture: trigger above the doji bar; the point is the FIRED-exemption, not the fill geometry.)
     state_dir, memory_dir = tmp_path / "s", tmp_path / "m"
     ex = FakeExchange({"BTC/USDT:USDT": _uptrend()})
     last = _pf(state_dir, memory_dir, ex)["briefs"][0]["last_close"]
@@ -437,15 +439,14 @@ def test_gate_auto_cancels_stale_short_even_when_it_would_fire(tmp_path):
                                            tps=[last - 20.0], anchor=last + 8.0)])
     report = gate_execute_step(ex, _settings(), state_dir, memory_dir, now=NOW, cycle_no=1,
                                proposals=[], regime_state=_regime("risk_off"))
-    assert report["auto_canceled_stale"] == 1
-    assert report["triggers_fired"] == 0 and report["opened"] == 0
-    assert load_pending_orders(state_dir) == []          # not persisted -> team re-arms next cycle
-    assert any("auto-canceled STALE" in a for a in report.get("warnings", []))
+    assert report["auto_canceled_stale"] == 0            # fired trigger is EXEMPT from stale-cancel
+    assert report["triggers_fired"] == 1 and report["opened"] == 1
+    assert load_pending_orders(state_dir) == []          # consumed from the store, not re-armed
 
 
-def test_gate_auto_cancels_stale_long_mirror(tmp_path):
-    # symmetric mirror: long breakout armed below resistance; the 20-bar swing_high has since risen
-    # ABOVE the level -> resistance crossed up -> auto-cancel (no long/short asymmetry).
+def test_gate_does_not_stale_cancel_a_fired_long_mirror(tmp_path):
+    # mirror: a long whose swing_high drifted above the trigger is geometrically stale, yet it
+    # FIRES (close > trigger) = a live buy-stop fill -> opens, not canceled (no long/short bias).
     state_dir, memory_dir = tmp_path / "s", tmp_path / "m"
     ex = FakeExchange({"BTC/USDT:USDT": _uptrend()})
     last = _pf(state_dir, memory_dir, ex)["briefs"][0]["last_close"]
@@ -453,8 +454,27 @@ def test_gate_auto_cancels_stale_long_mirror(tmp_path):
                                            tps=[last + 30.0], anchor=last - 12.0)])
     report = gate_execute_step(ex, _settings(), state_dir, memory_dir, now=NOW, cycle_no=1,
                                proposals=[], regime_state=_regime("risk_on"))
-    assert report["auto_canceled_stale"] == 1 and report["opened"] == 0
-    assert load_pending_orders(state_dir) == []
+    assert report["auto_canceled_stale"] == 0 and report["triggers_fired"] == 1
+    assert report["opened"] == 1
+    assert load_pending_orders(state_dir) == []          # consumed from the store, not re-armed
+
+
+def test_gate_auto_cancels_stale_unfired_short(tmp_path):
+    # the KEPT protection: an UN-FIRED short (close stayed ABOVE the trigger — no break this bar)
+    # whose anchored support has since drifted BELOW the trigger is retired so it can't fire LATE on
+    # a mid-bounce re-touch next cycle. Only un-fired (remaining) triggers are revalidated now.
+    state_dir, memory_dir = tmp_path / "s", tmp_path / "m"
+    ex = FakeExchange({"BTC/USDT:USDT": _uptrend()})            # close ~147.2, swing_low ~131.8
+    last = _pf(state_dir, memory_dir, ex)["briefs"][0]["last_close"]
+    # trigger below the close (close > trigger => no fire), support drifted below it => stale
+    save_pending_orders(state_dir, [_armed("short", trigger=last - 7.0, stop=last - 1.0,
+                                           tps=[last - 27.0], anchor=last - 6.0)])
+    report = gate_execute_step(ex, _settings(), state_dir, memory_dir, now=NOW, cycle_no=1,
+                               proposals=[], regime_state=_regime("risk_off"))
+    assert report["auto_canceled_stale"] == 1
+    assert report["triggers_fired"] == 0 and report["opened"] == 0
+    assert load_pending_orders(state_dir) == []          # not persisted -> team re-arms next cycle
+    assert any("auto-canceled STALE" in a for a in report.get("warnings", []))
 
 
 def test_gate_keeps_unstamped_trigger_and_does_not_autocancel(tmp_path):

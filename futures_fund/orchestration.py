@@ -734,18 +734,20 @@ def gate_execute_step(exchange, settings: Settings, state_dir, memory_dir,
                                                      held_symbols=held_symbols,
                                                      oi_change_by_symbol=oi_change_by_symbol)
 
-    # AUTO-REVALIDATE armed stop_entry geometry: a trigger whose swing anchor crossed PAST its level
-    # since it was armed (swing_low fell below a breakdown short, or swing_high rose over a breakout
-    # long) would now fire MID-BOUNCE, not on a fresh break (the cy43 ETH case the RM caught by eye)
-    # Auto-cancel it through the SAME flow as an explicit cancel — dropped from fired (never opened)
-    # AND from remaining (not persisted) — so the team re-arms at the true level next cycle via the
-    # flow (Rule 1, never a manual store edit). Only PRIOR-armed triggers are checked; this cycle's
-    # new_triggers are placed against this swing and are fresh by construction. Symmetric+fail-safe.
-    stale_orders, _ = revalidate_triggers(fired + remaining, swings_by_symbol)
+    # AUTO-REVALIDATE armed stop_entry geometry — but ONLY for triggers that did NOT fire this bar.
+    # A trigger in `fired` CLOSED THROUGH its level this bar, so price provably traded through it: a
+    # LIVE resting stop would have FILLED at the trigger this bar (the cy66 BCH case: short @197.5
+    # fills the instant price trades through, before the 192.65 low even forms). Canceling a fired
+    # trigger would misrepresent live execution, so `fired` is EXEMPT. Only an UN-FIRED `remaining`
+    # trigger whose anchored swing has since drifted PAST its level (swing_low under a breakdown
+    # short / swing_high over a breakout long) is retired — so it cannot fire LATE on a mid-
+    # bounce re-touch next cycle. Auto-canceled through the SAME flow as an explicit cancel (not
+    # persisted) so the team re-arms at the true level (Rule 1, never a manual store edit). This
+    # cycle's new_triggers are fresh by construction. Symmetric.
+    stale_orders, _ = revalidate_triggers(remaining, swings_by_symbol)
     stale_ids = {o.id for o in stale_orders}
     stale_actions = []
     if stale_ids:
-        fired = [o for o in fired if o.id not in stale_ids]
         remaining = [o for o in remaining if o.id not in stale_ids]
         for o in stale_orders:
             sh, sl = swings_by_symbol.get(o.symbol, (None, None))

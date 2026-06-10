@@ -41,6 +41,16 @@ def test_stop_entry_short_no_fire_on_close_at_or_above(tmp_path):
     assert not fired and len(remaining) == 1  # strict <
 
 
+def test_stop_entry_short_fires_on_genuine_breakdown_through_trigger(tmp_path):
+    # the cy66 BCH case: the bar traded UP TO/through the trigger (high 101 >= 100) and CLOSED below
+    # it (close 96) -> a real downward break = a live sell-stop fill at the trigger. Fires + opens.
+    _save(tmp_path, [_o(kind="stop_entry", direction="short", trigger=100, stop=105)])
+    fired, _, remaining = check_pending_orders(
+        tmp_path, {"BTCUSDT": {"close": 96, "low": 95, "high": 101}}, 5)
+    assert len(fired) == 1 and not remaining
+    assert fired_to_proposal(fired[0])["entry"] == 100  # fills at the trigger price
+
+
 def test_limit_entry_long_fires_on_low_touch(tmp_path):
     _save(tmp_path, [_o(kind="limit_entry", direction="long", trigger=100, stop=95)])
     fired, _, _ = check_pending_orders(tmp_path, {"BTCUSDT": {"close": 105, "low": 99, "high": 106}}, 5)
