@@ -53,7 +53,16 @@ def record_lessons(memory_dir, lessons: list[dict], ts: datetime) -> list[str]:
     existing = {lz.text for lz in read_lessons(memory_dir)}
     ids: list[str] = []
     for lesson in lessons:
-        text = str(lesson.get("text") or "").strip()
+        # Accept the canonical "text" plus the aliases an LLM Reflector commonly drifts to
+        # ("lesson"/"rule"/"insight"). That exact key drift silently dropped real minted lessons in
+        # cycles 62 and 65 (appended 0, no error); tolerate it so a key slip never costs a lesson.
+        # Strip EACH candidate before choosing so a whitespace-only canonical "text" (e.g.
+        # {"text": "  ", "lesson": "real"}) still falls through to the alias instead of dropping.
+        text = next(
+            (s for s in (str(lesson.get(k) or "").strip()
+                         for k in ("text", "lesson", "rule", "insight")) if s),
+            "",
+        )
         if not text or text in existing:
             continue
         ids.append(record_lesson(

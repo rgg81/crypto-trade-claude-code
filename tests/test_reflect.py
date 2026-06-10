@@ -69,3 +69,45 @@ def test_record_lessons_skips_blank_and_uses_defaults(tmp_path):
     assert len(ids) == 1  # blank/whitespace text skipped
     lz = read_lessons(tmp_path)[0]
     assert lz.text == "real lesson" and lz.polarity == "restrictive"  # default polarity
+
+
+def test_record_lessons_accepts_lesson_alias_for_text(tmp_path):
+    # The LLM Reflector sometimes emits the candidate under the key "lesson" (or "rule"/"insight")
+    # instead of the canonical "text". record_lessons MUST NOT silently drop it — that exact key
+    # drift silently skipped real, minted lessons in cycles 62 and 65 (appended 0 with no error).
+    ensure_memory_layout(tmp_path)
+    ids = record_lessons(
+        tmp_path,
+        [{"lesson": "aliased via 'lesson' key", "tags": ["t"], "polarity": "enabling"},
+         {"rule": "aliased via 'rule' key", "tags": ["t"]},
+         {"insight": "aliased via 'insight' key", "tags": ["t"]}],  # all three aliases must resolve
+        datetime(2026, 6, 10, tzinfo=UTC))
+    assert len(ids) == 3  # every alias resolved to text, none dropped
+    texts = {lz.text for lz in read_lessons(tmp_path)}
+    assert {"aliased via 'lesson' key", "aliased via 'rule' key",
+            "aliased via 'insight' key"} <= texts
+    by_text = {lz.text: lz for lz in read_lessons(tmp_path)}
+    assert by_text["aliased via 'lesson' key"].polarity == "enabling"
+
+
+def test_record_lessons_canonical_text_wins_over_alias(tmp_path):
+    # Precedence guard: a present, non-blank canonical "text" must NOT be shadowed by a competing
+    # alias (protects against a future reorder of the chain duplicating/overriding lessons).
+    ensure_memory_layout(tmp_path)
+    ids = record_lessons(tmp_path, [{"text": "canonical wins", "lesson": "ALIAS must not record"}],
+                         datetime(2026, 6, 10, tzinfo=UTC))
+    assert len(ids) == 1
+    texts = {lz.text for lz in read_lessons(tmp_path)}
+    assert "canonical wins" in texts and "ALIAS must not record" not in texts
+
+
+def test_record_lessons_blank_canonical_falls_through_to_alias(tmp_path):
+    # The sharp case: a WHITESPACE-only canonical "text" plus real content under an alias must still
+    # record (strip-before-choose), not short-circuit to '' and drop the lesson — the cy62/65 loss
+    # mode in mixed-key shape. Asserts the alias-rescue is symmetric for ''/whitespace canonicals.
+    ensure_memory_layout(tmp_path)
+    ids = record_lessons(tmp_path,
+                         [{"text": "   ", "lesson": "recovered from whitespace canonical"}],
+                         datetime(2026, 6, 10, tzinfo=UTC))
+    assert len(ids) == 1
+    assert read_lessons(tmp_path)[0].text == "recovered from whitespace canonical"
