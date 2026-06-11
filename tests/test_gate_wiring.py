@@ -192,10 +192,12 @@ def test_gate_fires_armed_long_trigger(tmp_path):
     state_dir, memory_dir = tmp_path / "s", tmp_path / "m"
     ex = FakeExchange({"BTC/USDT:USDT": _uptrend()})
     last = _pf(state_dir, memory_dir, ex)["briefs"][0]["last_close"]
-    # stop_entry long fires when the latest 4h CLOSE > trigger; uptrend close is `last`
+    # stop_entry long fires when the latest 4h CLOSE > trigger; uptrend close is `last`. The trigger
+    # sits BELOW the narrow ±0.2 bar (a clean gap), so the gap-honest fill is the bar OPEN (~last);
+    # RR = 10/4 at that realistic fill clears the floor.
     save_pending_orders(state_dir, [PendingOrder(
         symbol="BTCUSDT", direction="long", kind="stop_entry", trigger_level=last - 2.0,
-        stop=last - 8.0, take_profits=[last + 10.0], atr=2.0, created_cycle=1, expires_cycle=5)])
+        stop=last - 4.0, take_profits=[last + 10.0], atr=2.0, created_cycle=1, expires_cycle=5)])
     report = gate_execute_step(ex, _settings(), state_dir, memory_dir, now=NOW, cycle_no=1,
                                proposals=[])
     assert report["triggers_fired"] == 1 and report["opened"] == 1
@@ -355,9 +357,10 @@ class _OiFeedDownEx(FakeExchange):
 
 def _armed_oi_short(last, require_oi_rising):
     # trigger above the last completed close so the price-break (close < trigger) is satisfied;
-    # the OI-gate then decides fire vs hold. RR = 25/7 ~ 3.6 clears the gate.
+    # the OI-gate then decides fire vs hold. The narrow _uptrend bar sits BELOW the trigger (a gap),
+    # so the gap-honest fill is the bar OPEN (~last); RR = 20/8 = 2.5 at that fill clears the gate.
     return PendingOrder(symbol="BTCUSDT", direction="short", kind="stop_entry",
-                        trigger_level=last + 5.0, stop=last + 12.0, take_profits=[last - 20.0],
+                        trigger_level=last + 5.0, stop=last + 8.0, take_profits=[last - 20.0],
                         atr=2.0, require_oi_rising=require_oi_rising,
                         created_cycle=0, expires_cycle=9)
 
@@ -458,7 +461,7 @@ def test_gate_does_not_stale_cancel_a_fired_short(tmp_path):
     state_dir, memory_dir = tmp_path / "s", tmp_path / "m"
     ex = FakeExchange({"BTC/USDT:USDT": _uptrend()})
     last = _pf(state_dir, memory_dir, ex)["briefs"][0]["last_close"]
-    save_pending_orders(state_dir, [_armed("short", trigger=last + 4.0, stop=last + 12.0,
+    save_pending_orders(state_dir, [_armed("short", trigger=last + 4.0, stop=last + 7.0,
                                            tps=[last - 20.0], anchor=last + 8.0)])
     report = gate_execute_step(ex, _settings(), state_dir, memory_dir, now=NOW, cycle_no=1,
                                proposals=[], regime_state=_regime("risk_off"))
@@ -473,7 +476,7 @@ def test_gate_does_not_stale_cancel_a_fired_long_mirror(tmp_path):
     state_dir, memory_dir = tmp_path / "s", tmp_path / "m"
     ex = FakeExchange({"BTC/USDT:USDT": _uptrend()})
     last = _pf(state_dir, memory_dir, ex)["briefs"][0]["last_close"]
-    save_pending_orders(state_dir, [_armed("long", trigger=last - 10.0, stop=last - 20.0,
+    save_pending_orders(state_dir, [_armed("long", trigger=last - 10.0, stop=last - 11.0,
                                            tps=[last + 30.0], anchor=last - 12.0)])
     report = gate_execute_step(ex, _settings(), state_dir, memory_dir, now=NOW, cycle_no=1,
                                proposals=[], regime_state=_regime("risk_on"))

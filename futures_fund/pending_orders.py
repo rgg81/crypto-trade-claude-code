@@ -57,6 +57,11 @@ class PendingOrder(BaseModel):
     anchor_swing: float | None = None
     created_cycle: int = 0
     expires_cycle: int = 0
+    # GAP-HONEST FILL PRICE stamped at fire time (a stop_entry fills at trigger_level only if price
+    # TRADED there this bar; on a clean gap PAST the level the first live print is the bar open —
+    # worse). None = not yet fired / in-range / no open available -> fired_to_proposal falls back to
+    # trigger_level. Transient (set on the in-memory fired order; never persisted to the store).
+    fire_fill: float | None = None
 
 
 def _store(state_dir) -> Path:
@@ -104,10 +109,14 @@ def upsert_triggers(orders: list[PendingOrder], new_triggers: list[PendingOrder]
 
 
 def fired_to_proposal(o: PendingOrder) -> dict:
-    """A fired trigger becomes a normal AgentProposal at the TRIGGER price (favorable paper fill).
-    It then competes in the same gate (RR/heat/sizing/liq) as fresh opens — but, being an already
-    confirmed break, it is EXEMPT from the counter-regime confirmation transform (not re-armed)."""
-    return {"symbol": o.symbol, "direction": o.direction, "entry": o.trigger_level,
+    """A fired trigger becomes a normal AgentProposal at the GAP-HONEST fill price: the trigger
+    level when price TRADED through it this bar (a resting stop fills at its level), or the bar OPEN
+    when the bar gapped clean past the level (the first live print — worse, never better). It then
+    competes in the same gate (RR/heat/sizing/liq) as fresh opens — but, being an already confirmed
+    break, it is EXEMPT from the counter-regime confirmation transform (not re-armed). The realized
+    open also carries the executor's adverse slippage (fill = trigger ± slip)."""
+    entry = o.fire_fill if o.fire_fill is not None else o.trigger_level
+    return {"symbol": o.symbol, "direction": o.direction, "entry": entry,
             "stop": o.stop, "take_profits": o.take_profits, "atr": o.atr,
             "confidence": o.confidence, "risk_mult": o.risk_mult,
             "falsifiable_prediction": o.falsifiable_prediction,
@@ -225,6 +234,18 @@ def non_crypto_triggers(orders: list[PendingOrder],
     return untradeable, tradeable
 
 
+def _gap_honest_fill(trigger_level, open_, low, high):
+    """Realistic fill price for a fired stop_entry. `trigger_level` when price TRADED through the
+    level this bar (low <= level <= high -> a live resting stop fills AT its level); otherwise the
+    bar OPEN — the first live print when the bar gapped clean PAST the level (worse, never better).
+    Missing low/high (range unknown) or missing open -> fall back to trigger_level; never
+    raises. Pure and DIRECTION-AGNOSTIC (keys on the level vs the bar range, never the side)."""
+    gapped = low is not None and high is not None and not (low <= trigger_level <= high)
+    if gapped and open_ is not None and math.isfinite(open_):  # NaN/inf open -> safe fallback
+        return float(open_)
+    return float(trigger_level)
+
+
 def check_pending_orders(state_dir, bars_by_symbol: dict, cycle_no: int,
                          held_symbols=frozenset(),
                          oi_change_by_symbol: dict | None = None) -> tuple[list, list, list]:
@@ -245,6 +266,8 @@ def check_pending_orders(state_dir, bars_by_symbol: dict, cycle_no: int,
                        (o.direction == "long" and close is not None and close > o.trigger_level)
                 if fire and o.require_oi_rising:   # symmetric fresh-OI gate (fail-safe)
                     fire = _oi_confirms(oi_change_by_symbol, o.symbol)
+                if fire:                           # GAP-HONEST FILL (direction-agnostic, Rule 5):
+                    o.fire_fill = _gap_honest_fill(o.trigger_level, bar.get("open"), low, high)
             else:                        # limit_entry: TOUCH of the level
                 if o.direction == "long" and low is not None and low <= o.trigger_level:
                     if low <= o.stop:    # knife guard: bar tagged trigger AND stop in one bar

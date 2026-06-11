@@ -53,6 +53,55 @@ def test_stop_entry_short_fires_on_genuine_breakdown_through_trigger(tmp_path):
     assert fired_to_proposal(fired[0])["entry"] == 100  # fills at the trigger price
 
 
+def test_stop_entry_long_gap_up_fills_at_bar_open_not_trigger(tmp_path):
+    # GAP-HONEST FILL: a long breakout stop_entry @100 fires on close 108>100, but the firing bar
+    # GAPPED UP (open 105, low 104 > 100) — price never traded at 100, so a live buy-stop's first
+    # fill is the gap-open 105 (worse), NOT the unattainable 100. Symmetric realism, only worsens.
+    _save(tmp_path, [_o(kind="stop_entry", direction="long", trigger=100, stop=94, tps=[120])])
+    fired, _, remaining = check_pending_orders(
+        tmp_path, {"BTCUSDT": {"open": 105, "low": 104, "high": 110, "close": 108}}, 5)
+    assert len(fired) == 1 and not remaining
+    assert fired_to_proposal(fired[0])["entry"] == 105   # gap-open, not the trigger 100
+
+
+def test_stop_entry_short_gap_down_fills_at_bar_open_not_trigger(tmp_path):
+    # mirror: a short breakdown stop_entry @100 fires on close 95<100, but the bar GAPPED DOWN
+    # (open 96, high 97 < 100) — 100 never traded, so the live sell-stop's first fill is the
+    # gap-open 96 (worse for a short), NOT 100.
+    _save(tmp_path, [_o(kind="stop_entry", direction="short", trigger=100, stop=106, tps=[80])])
+    fired, _, remaining = check_pending_orders(
+        tmp_path, {"BTCUSDT": {"open": 96, "low": 94, "high": 97, "close": 95}}, 5)
+    assert len(fired) == 1 and not remaining
+    assert fired_to_proposal(fired[0])["entry"] == 96    # gap-open, not the trigger 100
+
+
+def test_stop_entry_in_range_bar_still_fills_at_trigger_even_with_open(tmp_path):
+    # the level WAS traded this bar (low 97 <= 100 <= high 108) -> a resting stop fills at 100; the
+    # bar open 98 must NOT override the in-range trigger fill (favorable-but-achievable).
+    _save(tmp_path, [_o(kind="stop_entry", direction="long", trigger=100, stop=94, tps=[120])])
+    fired, _, _ = check_pending_orders(
+        tmp_path, {"BTCUSDT": {"open": 98, "low": 97, "high": 108, "close": 105}}, 5)
+    assert fired_to_proposal(fired[0])["entry"] == 100
+
+
+def test_stop_entry_gap_with_nonfinite_open_falls_back_to_trigger(tmp_path):
+    # a corrupt/non-finite open on a gapped bar must NOT propagate NaN into the entry (which would
+    # slip the RR veto, since NaN < floor is False) -> fall back to the trigger level, fail-safe.
+    _save(tmp_path, [_o(kind="stop_entry", direction="short", trigger=100, stop=106, tps=[80])])
+    fired, _, _ = check_pending_orders(
+        tmp_path, {"BTCUSDT": {"open": float("nan"), "close": 95, "low": 94, "high": 97}}, 5)
+    assert fired_to_proposal(fired[0])["entry"] == 100
+
+
+def test_stop_entry_gap_without_open_falls_back_to_trigger(tmp_path):
+    # robustness: a gapped bar with NO `open` key (legacy feed) cannot price the gap -> fall back to
+    # the trigger level (prior behavior), never raise. high 97 < trigger 100 = gapped, but no open.
+    _save(tmp_path, [_o(kind="stop_entry", direction="short", trigger=100, stop=106, tps=[80])])
+    fired, _, _ = check_pending_orders(
+        tmp_path, {"BTCUSDT": {"close": 95, "low": 94, "high": 97}}, 5)
+    assert fired_to_proposal(fired[0])["entry"] == 100
+
+
 def test_limit_entry_long_fires_on_low_touch(tmp_path):
     _save(tmp_path, [_o(kind="limit_entry", direction="long", trigger=100, stop=95)])
     fired, _, _ = check_pending_orders(tmp_path, {"BTCUSDT": {"close": 105, "low": 99, "high": 106}}, 5)

@@ -801,8 +801,8 @@ def gate_execute_step(exchange, settings: Settings, state_dir, memory_dir,
             continue
         try:
             bar = df.iloc[-1]
-            bars_by_symbol[raw] = {"high": float(bar["high"]), "low": float(bar["low"]),
-                                   "close": float(bar["close"])}
+            bars_by_symbol[raw] = {"open": float(bar["open"]), "high": float(bar["high"]),
+                                   "low": float(bar["low"]), "close": float(bar["close"])}
         except (KeyError, TypeError, ValueError):
             pass
         if raw in oi_gate_syms:   # completed-bar OI aligned to the same `now` the bar was read at
@@ -822,10 +822,11 @@ def gate_execute_step(exchange, settings: Settings, state_dir, memory_dir,
                                                      oi_change_by_symbol=oi_change_by_symbol)
 
     # AUTO-REVALIDATE armed stop_entry geometry — but ONLY for triggers that did NOT fire this bar.
-    # A trigger in `fired` CLOSED THROUGH its level this bar, so price provably traded through it: a
-    # LIVE resting stop would have FILLED at the trigger this bar (the cy66 BCH case: short @197.5
-    # fills the instant price trades through, before the 192.65 low even forms). Canceling a fired
-    # trigger would misrepresent live execution, so `fired` is EXEMPT. Only an UN-FIRED `remaining`
+    # A trigger in `fired` CLOSED THROUGH its level this bar, so a LIVE resting stop FIRED —
+    # canceling it would misrepresent live execution, so `fired` is EXEMPT. (The fill PRICE is the
+    # trigger level only when the level sat inside the bar range [low,high]; on a clean gap PAST the
+    # level the fill is the bar OPEN — priced gap-honestly in check_pending_orders, not here.) Only
+    # an UN-FIRED `remaining`
     # trigger whose anchored swing has since drifted PAST its level (swing_low under a breakdown
     # short / swing_high over a breakout long) is retired — so it cannot fire LATE on a mid-
     # bounce re-touch next cycle. Auto-canceled through the SAME flow as an explicit cancel (not
