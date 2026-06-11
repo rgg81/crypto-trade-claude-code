@@ -58,12 +58,59 @@ def test_long_take_profit_hit_realizes_gain():
     assert ct.realized_pnl > 0
 
 
-def test_long_liquidation_takes_priority_over_stop():
-    # bar low below BOTH stop (95) and liq (82) -> liquidation wins
+def test_long_liquidation_fills_at_bankruptcy_price_not_maintenance_liq():
+    # FIX 3: an isolated liq closes at/through the BANKRUPTCY price (entry - margin/qty = 100 - 20 =
+    # 80 for qty 0.5 / margin 10), the FULL-margin loss — not the maintenance liq 82 (partial).
+    # Still takes priority over the stop (bar low 80 below both).
     ct = detect_exit(_long(), bar_high=101.0, bar_low=80.0,
                      funding_rate=0.0, funding_events=0, slippage_bps=0)
     assert ct.reason == "liquidation"
-    assert ct.exit_price == pytest.approx(82.0)
+    assert ct.exit_price == pytest.approx(80.0)            # bankruptcy, not 82
+    assert ct.gross_pnl == pytest.approx(0.5 * (80.0 - 100.0))  # -10 = full margin
+    assert abs(ct.realized_pnl) >= 10.0                    # >= the isolated margin
+
+
+def test_short_liquidation_fills_at_bankruptcy_price():
+    # mirror: short bankruptcy = entry + margin/qty = 100 + 20 = 120 (vs maintenance liq 118).
+    ct = detect_exit(_short(), bar_high=121.0, bar_low=99.0,
+                     funding_rate=0.0, funding_events=0, slippage_bps=0)
+    assert ct.reason == "liquidation"
+    assert ct.exit_price == pytest.approx(120.0)
+    assert abs(ct.realized_pnl) >= 10.0
+
+
+def test_long_stop_gap_down_fills_at_bar_open_not_stop():
+    # FIX 2: the bar GAPPED DOWN through the stop (open 90, high 92 < stop 95) -> a live stop-market
+    # fills at the open 90 (worse), not the unreachable 95. Loss is honestly larger.
+    ct = detect_exit(_long(), bar_high=92.0, bar_low=88.0, bar_open=90.0,
+                     funding_rate=0.0, funding_events=0, slippage_bps=0)
+    assert ct.reason == "stop"
+    assert ct.exit_price == pytest.approx(90.0)            # gap-open, not the 95 stop
+    assert ct.gross_pnl == pytest.approx(0.5 * (90.0 - 100.0))  # -5.0, worse than -2.5 at the stop
+
+
+def test_short_stop_gap_up_fills_at_bar_open_not_stop():
+    # mirror: gapped UP through the short's stop 105 (open 110, low 108 > 105) -> fill at open 110.
+    ct = detect_exit(_short(), bar_high=112.0, bar_low=108.0, bar_open=110.0,
+                     funding_rate=0.0, funding_events=0, slippage_bps=0)
+    assert ct.reason == "stop"
+    assert ct.exit_price == pytest.approx(110.0)           # gap-open, not the 105 stop
+    assert ct.gross_pnl == pytest.approx(0.5 * (100.0 - 110.0))  # -5.0, worse than -2.5
+
+
+def test_within_range_stop_still_fills_at_stop_level():
+    # no gap (bar opened ABOVE the stop and fell through it) -> fills at the stop level, unchanged.
+    ct = detect_exit(_long(), bar_high=101.0, bar_low=94.0, bar_open=99.0,
+                     funding_rate=0.0, funding_events=0, slippage_bps=0)
+    assert ct.reason == "stop" and ct.exit_price == pytest.approx(95.0)
+
+
+def test_tp_gap_through_still_books_at_tp_level():
+    # a TP (reduce-only limit) fills at level-or-better; booking the level on a gap-through is
+    # conservative -> a long TP 115 with the bar gapping UP through it still books 115 (not 116).
+    ct = detect_exit(_long(), bar_high=120.0, bar_low=116.0, bar_open=116.0,
+                     funding_rate=0.0, funding_events=0, slippage_bps=0)
+    assert ct.reason == "take_profit" and ct.exit_price == pytest.approx(115.0)
 
 
 def test_long_stop_beats_tp_when_both_touched():

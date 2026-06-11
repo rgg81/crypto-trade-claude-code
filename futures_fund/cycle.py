@@ -81,6 +81,7 @@ def audit_and_reflect(ctx: CycleContext, positions: list[Position], account: Acc
         fr = ctx.fundings[sym]
         n_events = count_funding_events(p.opened_ts, now, int(fr.interval_hours))
         ct = detect_exit(p, bar_high=float(bar["high"]), bar_low=float(bar["low"]),
+                         bar_open=float(bar["open"]),  # gap-honest stop/liq exit fills
                          funding_rate=fr.current_rate, funding_events=n_events,
                          slippage_bps=_SLIPPAGE_BPS)
         if ct is None:

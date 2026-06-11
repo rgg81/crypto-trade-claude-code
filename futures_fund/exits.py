@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import Literal
 
 from pydantic import BaseModel
@@ -49,18 +50,41 @@ def _trigger(
     return None
 
 
+def _gap_honest_exit_level(position: Position, reason: ExitReason, level: float,
+                           bar_open: float | None) -> float:
+    """The realistic fill LEVEL for an exit, never better than the trigger level (long/short
+    symmetric). A STOP the bar OPENED beyond (gapped past) fills at the bar OPEN — the first live
+    print — not the unreachable stop. A LIQUIDATION fills at/through the BANKRUPTCY price
+    (entry -/+ margin/qty = the full isolated-margin loss), worse than the maintenance liq trigger.
+    A TAKE-PROFIT is a reduce-only limit that fills at level-or-better, so booking the level is
+    already conservative -> unchanged."""
+    is_long = position.direction == "long"
+    if reason == "liquidation" and position.qty > 0:
+        bankruptcy = (position.entry - position.margin / position.qty) if is_long \
+            else (position.entry + position.margin / position.qty)
+        return min(level, bankruptcy) if is_long else max(level, bankruptcy)
+    if reason == "stop" and bar_open is not None and math.isfinite(bar_open):
+        return min(level, bar_open) if is_long else max(level, bar_open)
+    return level
+
+
 def detect_exit(
     position: Position, bar_high: float, bar_low: float, *,
     funding_rate: float, funding_events: int, slippage_bps: float, pay_bnb: bool = False,
+    bar_open: float | None = None,
 ) -> ClosedTrade | None:
     """Return a ClosedTrade if the bar triggered an exit, else None. PnL is net of exit fee,
-    accrued funding, and exit-side slippage."""
+    accrued funding, and exit-side slippage. Exit fills are GAP-HONEST: a stop/liq the bar gapped
+    past fills at the worse of (level, bar open) / the bankruptcy price — never at an unreachable
+    level (see `_gap_honest_exit_level`). Reported `slippage` is the full adverse vs the trigger
+    level (gap + bps)."""
     hit = _trigger(position, bar_high, bar_low)
     if hit is None:
         return None
     reason, level = hit
+    fill_level = _gap_honest_exit_level(position, reason, level, bar_open)
     side = close_side(position.direction)
-    exit_fill = fill_price(level, side, slippage_bps)
+    exit_fill = fill_price(fill_level, side, slippage_bps)
     if position.direction == "long":
         gross = position.qty * (exit_fill - position.entry)
     else:
