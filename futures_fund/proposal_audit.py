@@ -57,7 +57,13 @@ def audit_item(item: dict, ground_truth: dict, *, is_trigger: bool) -> tuple[boo
     gt = (ground_truth or {}).get(item.get("symbol"))
     if not gt:
         return True, ""
-    entry = item.get("entry", item.get("trigger_level"))
+    # Audit the level the order ACTUALLY rests/fires at: `trigger_level` for a trigger, `entry` for
+    # a market open. (A misrouted/contradictory dict can carry both; check the authoritative one,
+    # not whichever looks clean.) Fall back to the other key so a single-keyed dict still audits.
+    primary, fallback = ("trigger_level", "entry") if is_trigger else ("entry", "trigger_level")
+    entry = item.get(primary)
+    if entry is None:
+        entry = item.get(fallback)
     ok, reason = audit_entry(entry, gt.get("mark"), is_trigger=is_trigger)
     if not ok:
         return False, reason

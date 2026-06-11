@@ -392,6 +392,35 @@ def management_review(payload: dict) -> list[dict]:
     return [] if m is None else m
 
 
+_RESTING_KINDS = frozenset({"stop_entry", "limit_entry"})
+
+
+def split_misrouted_resting(proposals, triggers):
+    """A resting conditional order (kind stop_entry/limit_entry) belongs in the `triggers` channel;
+    `proposals` is the MARKET-intent channel (the gate picks market-vs-trigger by regime). A resting
+    order MISROUTED into `proposals` would be silently mangled — a with-regime one opens at market
+    with inverted stop geometry (a no-op fill), a counter-regime one is dropped on the `entry`-key
+    lookup in `_proposal_to_stop_entry`. NEVER silently lose an intended trade (Rule 6, fail-loud):
+    move any such proposal into `triggers` so its resting intent is honored — every downstream gate
+    guard (audit, crypto-only, RR floor, geometry) still applies — and return the rerouted list so
+    the gate can surface it LOUD. Pure; symmetric long/short; does not mutate the input dicts.
+
+    Entry-price key normalization: a trigger needs `trigger_level`; a proposal-shaped dict carries
+    `entry`. When `trigger_level` is absent we copy it from `entry` (on a shallow COPY) so
+    PendingOrder ingestion downstream succeeds. Returns (market_proposals, triggers+rerouted,
+    rerouted)."""
+    market, rerouted = [], []
+    for p in (proposals or []):
+        if isinstance(p, dict) and p.get("kind") in _RESTING_KINDS:
+            t = dict(p)
+            if t.get("trigger_level") is None and t.get("entry") is not None:
+                t["trigger_level"] = t["entry"]
+            rerouted.append(t)
+        else:
+            market.append(p)
+    return market, list(triggers or []) + rerouted, rerouted
+
+
 def _fold_raw_symbols(exchange, settings: Settings, raw_symbols) -> Settings:
     """Fold extra RAW symbols (e.g. pending-trigger symbols) into the universe so their 4h bars
     are fetched and the trigger can be evaluated — same mechanism working_universe uses for held."""
@@ -611,6 +640,15 @@ def gate_execute_step(exchange, settings: Settings, state_dir, memory_dir,
         upsert_triggers,
     )
     from futures_fund.state import is_halted
+
+    # DEFENSE-IN-DEPTH (Rule 6, fail-loud): a resting conditional order (stop_entry/limit_entry)
+    # misrouted into `proposals` (the MARKET-intent channel) would be silently mangled. Re-route it
+    # to `triggers` BEFORE the audit so it is honored as the resting order it is; surface it LOUD.
+    proposals, triggers, _rerouted = split_misrouted_resting(proposals, triggers)
+    reroute_actions = [
+        f"REROUTED misrouted resting {p.get('kind')} {p.get('direction', '?')} "
+        f"{p.get('symbol', '?')} @ {p.get('trigger_level')} proposals->triggers "
+        f"(resting orders belong in 'triggers')" for p in _rerouted]
 
     # Pillar 4 AUDIT — anti-hallucination: drop any proposal/trigger whose entry/atr diverges too
     # far from the brief ground truth it was derived from (fabricated entry = a fantasy paper fill;
@@ -1005,6 +1043,10 @@ def gate_execute_step(exchange, settings: Settings, state_dir, memory_dir,
     if low_rr_actions:                               # surface each (Rule 6): re-spec or stand aside
         report.setdefault("actions", []).extend(low_rr_actions)
         report.setdefault("warnings", []).extend(low_rr_actions)
+    report["proposals_rerouted"] = len(_rerouted)    # resting orders misrouted into proposals
+    if reroute_actions:                              # surface each (Rule 6, fail-loud)
+        report.setdefault("actions", []).extend(reroute_actions)
+        report.setdefault("warnings", []).extend(reroute_actions)
     # REFLECT: score newly-resolvable RR-vetoed shadow trades against this cycle's frames and adapt
     # the per-quadrant RR floor (written for NEXT cycle). Every floor change is surfaced (Rule 6).
     def _bars_for(symbol, after_ts):

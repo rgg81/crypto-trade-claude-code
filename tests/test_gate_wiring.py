@@ -88,6 +88,29 @@ def test_gate_converts_counter_regime_long_to_trigger(tmp_path):
     assert report["opened"] == 0 and report["counter_regime_triggered"] == 1
 
 
+def test_gate_reroutes_misrouted_stop_entry_proposal_to_triggers(tmp_path):
+    # REGRESSION (cy70): a resting stop_entry order MISROUTED into `proposals` (the market-intent
+    # channel) must be RE-ROUTED to triggers and armed as a resting order — never silently mangled
+    # (a with-regime one was opened as a no-op market entry; a counter-regime one was dropped). The
+    # reroute is surfaced LOUD via report['proposals_rerouted'] + a warning, and every downstream
+    # gate guard (audit, crypto-only, RR floor, geometry) still applies.
+    state_dir, memory_dir = tmp_path / "s", tmp_path / "m"
+    ex = FakeExchange({"BTC/USDT:USDT": _uptrend()})
+    last = _pf(state_dir, memory_dir, ex)["briefs"][0]["last_close"]
+    # trigger below last => a short stop_entry does NOT fire on this bar -> arms. RR = 12/5 = 2.4.
+    prop = {"symbol": "BTCUSDT", "direction": "short", "kind": "stop_entry",
+            "trigger_level": last - 10.0, "stop": last - 5.0, "take_profits": [last - 22.0],
+            "atr": 2.0, "confidence": 0.7, "rationale": "misrouted resting order"}
+    report = gate_execute_step(ex, _settings(), state_dir, memory_dir, now=NOW, cycle_no=1,
+                               proposals=[prop], regime_state=_regime("risk_off"))
+    assert report["proposals_rerouted"] == 1
+    assert report["opened"] == 0 and report["market_entries"] == 0  # NOT mangled as a market entry
+    assert report["triggers_armed"] == 1                             # armed as a resting trigger
+    assert any("REROUTED" in w for w in report.get("warnings", []))  # surfaced LOUD (Rule 6)
+    orders = load_pending_orders(state_dir)                          # and persisted to the store
+    assert any(o.symbol == "BTCUSDT" and o.kind == "stop_entry" for o in orders)
+
+
 def test_gate_takes_with_regime_long_at_market(tmp_path):
     # a LONG while regime=risk_on (or mixed) is WITH-regime -> opens at market, no conversion.
     state_dir, memory_dir = tmp_path / "s", tmp_path / "m"

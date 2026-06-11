@@ -51,6 +51,28 @@ def test_symmetry_long_short_identical():
     assert audit_item(longp, gt, is_trigger=False)[0] is False
 
 
+def test_trigger_audits_on_trigger_level_not_a_divergent_entry():
+    # A trigger fires/rests at `trigger_level`; the anti-hallucination audit must check THAT level,
+    # not a divergent `entry` key. (Exposed by the resting-order reroute: a misrouted dict can carry
+    # both keys.) A hallucinated trigger_level 91% off mark must DROP even if `entry` looks clean.
+    gt = {"X": {"mark": 100.0, "atr": 2.0}}
+    item = {"symbol": "X", "trigger_level": 9.0, "entry": 100.0, "atr": 2.0}
+    assert audit_item(item, gt, is_trigger=True)[0] is False        # audited on trigger_level (9)
+    # symmetric mirror: a MARKET open audits on `entry`, ignoring a clean-looking trigger_level
+    mkt = {"symbol": "X", "entry": 9.0, "trigger_level": 100.0, "atr": 2.0}
+    assert audit_item(mkt, gt, is_trigger=False)[0] is False        # audited on entry (9)
+
+
+def test_single_keyed_orders_audit_unchanged():
+    # back-compat: a trigger with only trigger_level, a market open with only entry -> unchanged
+    gt = {"X": {"mark": 100.0, "atr": 2.0}}
+    assert audit_item({"symbol": "X", "trigger_level": 101.0, "atr": 2.0}, gt, is_trigger=True)[0]
+    assert audit_item({"symbol": "X", "entry": 101.0, "atr": 2.0}, gt, is_trigger=False)[0]
+    # a trigger missing trigger_level falls back to entry; a market open missing entry -> trig_level
+    assert audit_item({"symbol": "X", "entry": 101.0, "atr": 2.0}, gt, is_trigger=True)[0]
+    assert audit_item({"symbol": "X", "trigger_level": 101.0, "atr": 2.0}, gt, is_trigger=False)[0]
+
+
 def test_audit_batch_partitions_and_tags_reason():
     gt = {"AAA": {"mark": 100.0, "atr": 2.0}, "BBB": {"mark": 50.0, "atr": 1.0}}
     items = [
