@@ -78,6 +78,25 @@ def test_append_partial_bank_unknown_id_returns_false(tmp_path):
     assert append_partial_bank(tmp_path, "nope", {"pnl": 1.0}) is False
 
 
+def test_patch_outcome_auto_stamps_r_multiple_from_total_realized(tmp_path):
+    # cy78 journal-hygiene: 0/18 closes stamped r_multiple. patch_outcome now derives it from the
+    # TRUE realized (incl. partial banks) / initial risk, when not explicitly supplied.
+    did = append_decision(tmp_path, _decision(entry=100.0, stop=95.0, size=2.0))  # risk = 2*5 = 10
+    patch_outcome(tmp_path, did, {"realized_pnl": 25.0})                          # +2.5R
+    rec = next(d for d in read_all_decisions(tmp_path) if d["id"] == did)
+    assert rec["r_multiple"] == 2.5
+    # with a scale-out, r_multiple reflects TOTAL realized (banks + final)
+    d2 = append_decision(tmp_path, _decision(cycle=2, entry=100.0, stop=95.0, size=2.0))
+    append_partial_bank(tmp_path, d2, {"pnl": 5.0, "fraction": 0.5})
+    patch_outcome(tmp_path, d2, {"realized_pnl": 15.0})        # total 20 / risk 10 = 2.0R
+    rec2 = next(d for d in read_all_decisions(tmp_path) if d["id"] == d2)
+    assert rec2["r_multiple"] == 2.0
+    # an explicitly-supplied r_multiple is never overwritten
+    d3 = append_decision(tmp_path, _decision(cycle=3, entry=100.0, stop=95.0, size=2.0))
+    patch_outcome(tmp_path, d3, {"realized_pnl": 25.0, "r_multiple": 9.9})
+    assert next(d for d in read_all_decisions(tmp_path) if d["id"] == d3)["r_multiple"] == 9.9
+
+
 def test_patch_unknown_id_returns_false(tmp_path):
     append_decision(tmp_path, _decision())
     assert patch_outcome(tmp_path, "nonexistent", {"realized_pnl": 1.0}) is False

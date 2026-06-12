@@ -127,6 +127,32 @@ def _returns_corr(frames, raw_to_unified) -> dict:
     return out
 
 
+def _derive_setup(quadrant: str | None, direction: str) -> str:
+    """Coarse, deterministic setup archetype from the symbol's regime quadrant (cy78 fix so the
+    learning grid has a `setup` axis instead of all-null). trend->trend_follow, range->mean_rev,
+    transition->transition; the Trader may later carry an explicit finer label."""
+    q = quadrant or ""
+    if "trend" in q:
+        return "trend_follow"
+    if "range" in q:
+        return "mean_reversion"
+    if "transition" in q:
+        return "transition"
+    return "unclassified"
+
+
+def _retrieved_lesson_ids(state_dir, cycle_no: int) -> list[str]:
+    """The lesson ids injected into THIS cycle's debate (from state/cycle/N/lessons.json), stamped
+    onto each decision as `retrieved_memory_ids` — the Direction-B prerequisite so a lesson's
+    confirm/demote can be driven from the outcomes of the trades it informed. Fail-safe -> []."""
+    try:
+        from futures_fund.cycle_io import load_output
+        payload = load_output("state", cycle_no, "lessons")
+        return [lz.get("id") for lz in (payload.get("lessons") or []) if lz.get("id")]
+    except Exception:  # noqa: BLE001 — never break the cycle over an absent/garbled lessons file
+        return []
+
+
 def execute_proposals(  # noqa: PLR0912
         ctx: CycleContext, proposals: list[TradeProposal], contributing_agents: list[str],
         positions: list[Position], account: AccountState, state_dir, memory_dir,
@@ -262,8 +288,13 @@ def execute_proposals(  # noqa: PLR0912
     if len(to_open) < _before:
         report["cluster_trimmed"] = _before - len(to_open)
 
+    retrieved_ids = _retrieved_lesson_ids(state_dir, cycle_no)  # for retrieved_memory_ids stamping
     for st in to_open:
         spec = ctx.specs_by_raw[st.proposal.symbol]
+        # cy78 journal-hygiene: stamp regime/setup/retrieved_memory_ids at decision-time so the
+        # all-weather learning grid has cells and Direction-B lesson confirm/demote can be driven.
+        uni = ctx.raw_to_unified.get(st.proposal.symbol)
+        quad = simple_regime(ctx.frames[uni]).quadrant if uni in ctx.frames else None
         did = append_decision(memory_dir, {
             "ts": now, "cycle": cycle_no, "symbol": st.proposal.symbol,
             "direction": st.proposal.direction, "entry": st.proposal.entry,
@@ -273,6 +304,8 @@ def execute_proposals(  # noqa: PLR0912
             if contributing_agents else "unknown", "contributing_agents": contributing_agents,
             "rationale": (rationale_by_symbol or {}).get(st.proposal.symbol),
             "falsifiable_prediction": (prediction_by_symbol or {}).get(st.proposal.symbol),
+            "regime": quad, "setup": _derive_setup(quad, st.proposal.direction),
+            "retrieved_memory_ids": retrieved_ids,
         })
         pos, entry_fee = open_position(st, cycle_no, now, _SLIPPAGE_BPS, decision_id=did)
         mmr, maint = mmr_for_notional(pos.qty * pos.entry, spec.mmr_brackets)

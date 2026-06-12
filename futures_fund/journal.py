@@ -116,8 +116,17 @@ def patch_outcome(memory_dir, decision_id: str, outcome: dict) -> bool:
         hit = False
         for r in records:
             if r.get("id") == decision_id:
+                merged_dict = {**r, **outcome}
+                # Auto-stamp r_multiple at close (cy78 journal-hygiene: 0/18 closes carried it). Use
+                # the TRUE realized (final close + partial banks) / initial risk; never overwrite an
+                # explicitly-supplied r_multiple.
+                if (merged_dict.get("realized_pnl") is not None
+                        and merged_dict.get("r_multiple") is None):
+                    rm = _r_multiple(merged_dict)
+                    if rm is not None:
+                        merged_dict["r_multiple"] = rm
                 # validate the merged record so outcome types are coerced (e.g. datetimes)
-                merged = Decision.model_validate({**r, **outcome})
+                merged = Decision.model_validate(merged_dict)
                 r.clear()
                 r.update(json.loads(merged.model_dump_json()))
                 hit = True
@@ -149,6 +158,20 @@ def append_partial_bank(memory_dir, decision_id: str, bank: dict) -> bool:
             f.write_text("".join(json.dumps(r) + "\n" for r in records))
             return True
     return False
+
+
+def _r_multiple(decision: dict) -> float | None:
+    """R-multiple of a closed trade = TRUE realized (final close + partial banks) / initial risk
+    (size * |entry - stop|). None when geometry is missing/degenerate."""
+    try:
+        size = float(decision.get("size") or 0.0)
+        risk_per_unit = abs(float(decision["entry"]) - float(decision["stop"]))
+        denom = size * risk_per_unit
+        if denom <= 0:
+            return None
+        return realized_total(decision) / denom
+    except (TypeError, ValueError, KeyError):
+        return None
 
 
 def realized_total(decision: dict) -> float:
