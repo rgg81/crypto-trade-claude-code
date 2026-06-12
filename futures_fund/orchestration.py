@@ -1003,8 +1003,9 @@ def gate_execute_step(exchange, settings: Settings, state_dir, memory_dir,
     new_triggers = [_stamp_anchor_swing(po, swings_by_symbol) for po in cr_armed]
     cr_keys = {(o.symbol, o.direction, o.kind) for o in cr_armed}
     armed_collisions = 0
+    geometry_dropped = 0
     if not halted:
-        from futures_fund.pending_orders import PendingOrder
+        from futures_fund.pending_orders import PendingOrder, stop_entry_wrong_side_of_mark
         for t in (triggers or []):
             try:
                 fields = {**t, "created_cycle": cycle_no,
@@ -1013,9 +1014,20 @@ def gate_execute_step(exchange, settings: Settings, state_dir, memory_dir,
                 if (po.symbol, po.direction, po.kind) in cr_keys:
                     armed_collisions += 1
                     continue  # don't clobber the counter-regime safety trigger
+                # cy80 fix: a stop_entry placed on the WRONG SIDE of the mark (a short breakdown at/
+                # above mark, a long breakout at/below) has no break room and would fire off the
+                # next close with no genuine break (the BNB @611 case). Drop it fail-loud.
+                _mk = ctx.prices.get(po.symbol)
+                if stop_entry_wrong_side_of_mark(po, _mk):
+                    geometry_dropped += 1
+                    report.setdefault("warnings", []).append(
+                        f"trigger {po.symbol} {po.direction} {po.kind} @{po.trigger_level} wrong "
+                        f"side of mark {_mk} -> dropped (no break room)")
+                    continue
                 new_triggers.append(po)
             except Exception:  # noqa: BLE001 — drop a malformed trigger, keep the rest
                 pass
+    report["triggers_geometry_dropped"] = geometry_dropped
     # cancel is AUTHORITATIVE: a canceled key must not be re-armed this cycle, even by a cr-safety
     # conversion or a restated Trader trigger. Strip them so triggers_armed reflects the real store.
     if cancel_triggers:

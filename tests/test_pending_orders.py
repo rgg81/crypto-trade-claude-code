@@ -453,3 +453,22 @@ def test_non_crypto_triggers_direction_agnostic():
     untradeable, tradeable = non_crypto_triggers([nc_long, nc_short, c_long, c_short], is_crypto)
     assert {o.direction for o in untradeable} == {"long", "short"}  # BOTH sides of the stock retired
     assert {o.direction for o in tradeable} == {"long", "short"}    # BOTH sides of the coin kept
+
+
+def test_stop_entry_wrong_side_of_mark_arm_guard():
+    # cy80 fix: a SHORT breakdown stop_entry must sit BELOW the mark (room to break down); a LONG
+    # breakout ABOVE. Placed on the wrong side, it would fire on the next close with no real break
+    # (the BNB @611 short armed below a 605 mark, then fired off a 603.79 close).
+    from futures_fund.pending_orders import stop_entry_wrong_side_of_mark
+    # the actual cy80 BNB case: short stop_entry @611, mark 605 -> wrong-side (no breakdown room)
+    assert stop_entry_wrong_side_of_mark(_o(direction="short", trigger=611.0, stop=616.0), 605.0)
+    # a proper short breakdown trigger BELOW the mark -> ok
+    assert not stop_entry_wrong_side_of_mark(_o(direction="short", trigger=597.0, stop=606.0), 605)
+    # long breakout: trigger must be ABOVE the mark
+    assert stop_entry_wrong_side_of_mark(_o(direction="long", trigger=95.0, stop=90.0), 100.0)
+    assert not stop_entry_wrong_side_of_mark(_o(direction="long", trigger=105.0, stop=100.0), 100.0)
+    # limit_entry is EXEMPT (rests on the far side by design)
+    assert not stop_entry_wrong_side_of_mark(_o(direction="short", kind="limit_entry",
+                                                trigger=611.0, stop=616.0), 605.0)
+    # fail-safe: missing/non-finite mark -> not wrong-side (keep)
+    assert not stop_entry_wrong_side_of_mark(_o(direction="short", trigger=611.0, stop=616.0), None)

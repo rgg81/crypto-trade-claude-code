@@ -129,6 +129,26 @@ def _wrong_side_stop(o: PendingOrder) -> bool:
            (o.direction == "short" and o.stop <= o.trigger_level)
 
 
+def stop_entry_wrong_side_of_mark(o: PendingOrder, mark) -> bool:
+    """A breakout/breakdown stop_entry must have ROOM TO BREAK from the current mark: a SHORT
+    breakdown trigger sits BELOW the mark, a LONG breakout trigger ABOVE it. A stop_entry placed on
+    the WRONG side (short at/above mark, long at/below) has 'already broken' — it would fire on the
+    next bar's close with no genuine break (the cy80 BNB @611 fired off a 603.79 close because it
+    was armed below the mark). Reject those at ARM time. limit_entry is EXEMPT — a limit rests on
+    the far side by design (short above / long below). Fail-safe: a missing/non-finite mark -> not
+    wrong-side (can't validate -> keep)."""
+    if o.kind != "stop_entry":
+        return False
+    try:
+        m = float(mark)
+        if not math.isfinite(m):
+            return False
+    except (TypeError, ValueError):
+        return False
+    return (o.direction == "short" and o.trigger_level >= m) or \
+           (o.direction == "long" and o.trigger_level <= m)
+
+
 def _oi_confirms(oi_change_by_symbol, symbol: str) -> bool:
     """OI-confirmation predicate for require_oi_rising triggers: True ONLY if fresh OI is RISING
     (> OI_RISING_EPS) for `symbol`. Missing / None / NaN -> False (FAIL-SAFE: the break HOLDS the
