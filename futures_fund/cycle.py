@@ -66,6 +66,34 @@ def _recent_returns(memory_dir, equity: float) -> list[float]:
     return [p / equity for p in pnls[-30:]] if equity > 0 else []
 
 
+def _effective_funding_rate(entry_rate, exit_rate) -> float:
+    """Minimum-viable per-hold funding rate (cy78 retrospective fix): the AVERAGE of the rate at
+    ENTRY and at EXIT, instead of booking the exit-cycle rate over the WHOLE hold — which sign-
+    INVERTED the carry on any trade that spanned a funding flip (a short that entered COLLECTING on
+    negative funding then exited PAYING on positive funding was booked as paying the entire time,
+    corrupting the exact carry signal the desk's flagship short edge harvests). None entry_rate ->
+    fall back to the exit rate (legacy behavior)."""
+    if entry_rate is None:
+        return float(exit_rate)
+    try:
+        return (float(entry_rate) + float(exit_rate)) / 2.0
+    except (TypeError, ValueError):
+        return float(exit_rate)
+
+
+def _entry_funding_rate(memory_dir, decision_id):
+    """The funding rate recorded at entry (funding_at_entry) for `decision_id`, else None."""
+    if not decision_id:
+        return None
+    try:
+        for d in read_all_decisions(memory_dir):
+            if d.get("id") == decision_id:
+                return d.get("funding_at_entry")
+    except Exception:  # noqa: BLE001 — never break the exit path over a journal read
+        pass
+    return None
+
+
 def audit_and_reflect(ctx: CycleContext, positions: list[Position], account: AccountState,
                       memory_dir, now: datetime, report: dict,
                       agent_key: str = _BASELINE) -> list[Position]:
@@ -85,9 +113,13 @@ def audit_and_reflect(ctx: CycleContext, positions: list[Position], account: Acc
         bar = cdf.iloc[-1]
         fr = ctx.fundings[sym]
         n_events = count_funding_events(p.opened_ts, now, int(fr.interval_hours))
+        # Accrue funding at the AVERAGE of the entry and exit rates over the hold, not the exit rate
+        # alone — the cy78 sign-inversion fix (see _effective_funding_rate).
+        eff_rate = _effective_funding_rate(_entry_funding_rate(memory_dir, p.decision_id),
+                                           fr.current_rate)
         ct = detect_exit(p, bar_high=float(bar["high"]), bar_low=float(bar["low"]),
                          bar_open=float(bar["open"]),  # gap-honest stop/liq exit fills
-                         funding_rate=fr.current_rate, funding_events=n_events,
+                         funding_rate=eff_rate, funding_events=n_events,
                          slippage_bps=_SLIPPAGE_BPS)
         if ct is None:
             still_open.append(p)

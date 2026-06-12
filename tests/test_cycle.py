@@ -124,3 +124,12 @@ def test_vetoed_shadow_entry_carries_quadrant_and_id(tmp_path):
     assert led, "expected a vetoed shadow entry"
     assert "quadrant" in led[0] and "id" in led[0]
     assert led[0]["id"].startswith("1:")              # cycle_no 1
+
+
+def test_effective_funding_rate_averages_entry_and_exit_sign_fix():
+    # cy78: a trade spanning a funding flip must NOT book the exit-cycle rate over the whole hold.
+    from futures_fund.cycle import _effective_funding_rate
+    assert _effective_funding_rate(-0.001, 0.001) == 0.0       # collected then paid -> ~net zero
+    assert _effective_funding_rate(-0.001, -0.001) == -0.001   # collecting throughout (short edge)
+    assert _effective_funding_rate(0.0008, 0.0012) == 0.001    # paying throughout (long)
+    assert _effective_funding_rate(None, 0.0005) == 0.0005     # no entry rate -> legacy fallback
