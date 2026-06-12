@@ -568,6 +568,19 @@ def _apply_counter_regime_confirmation(proposals: list[dict], regime_state, cycl
     return market, armed
 
 
+def _decision_banked_in_cycle(memory_dir, decision_id, cycle_no) -> bool:
+    """True if `decision_id` already recorded a partial-bank slice in `cycle_no` — the idempotency
+    check that keeps a DUE RETRY from re-banking/re-crediting/re-halving a reduce (cy78 review)."""
+    from futures_fund.journal import read_all_decisions
+    try:
+        for d in read_all_decisions(memory_dir):
+            if d.get("id") == decision_id:
+                return any(b.get("cycle") == cycle_no for b in (d.get("partial_banks") or []))
+    except Exception:  # noqa: BLE001 — a journal read must never break the gate
+        pass
+    return False
+
+
 def _valid_reduce_fraction(v) -> float | None:
     """Coerce a reduce_fraction directive value to a float in (0, 1); None if invalid."""
     try:
@@ -735,8 +748,18 @@ def gate_execute_step(exchange, settings: Settings, state_dir, memory_dir,
                 reduce_dropped += 1
                 new_positions.append(p)  # malformed/unpriceable reduce: leave the position whole
                 continue
+            # cy78 review [1]: a DUE RETRY re-running this cycle must NOT re-bank/re-credit/halve.
+            # If this decision already banked a slice THIS cycle, skip the reduce entirely.
+            if p.decision_id and _decision_banked_in_cycle(memory_dir, p.decision_id, cycle_no):
+                new_positions.append(p)
+                continue
             n_events = count_funding_events(p.opened_ts, now, int(fr.interval_hours))
-            res = reduce_position(p, mark, frac, funding_rate=fr.current_rate,
+            # cy78 review [2]: average funding over the hold (entry+exit), not the exit rate alone —
+            # the same sign-fix the stop/TP/liq path got in P0d.
+            from futures_fund.cycle import _effective_funding_rate, _entry_funding_rate
+            eff = _effective_funding_rate(_entry_funding_rate(memory_dir, p.decision_id),
+                                          fr.current_rate)
+            res = reduce_position(p, mark, frac, funding_rate=eff,
                                   funding_events=n_events, slippage_bps=_SLIPPAGE_BPS, spec=spec)
             if res.kind == "promote_full":
                 # The runner would be sub-min-notional dust -> close 100% via the normal force_close
@@ -764,7 +787,7 @@ def gate_execute_step(exchange, settings: Settings, state_dir, memory_dir,
                     append_partial_bank(memory_dir, p.decision_id, {
                         "pnl": ct.realized_pnl, "fees": ct.exit_fee, "funding": ct.funding,
                         "slippage": ct.slippage, "fraction": frac, "price": ct.exit_price,
-                        "qty": ct.qty, "ts": now})
+                        "qty": ct.qty, "ts": now, "cycle": cycle_no})   # cycle -> retry idempotency
                 survivor = res.runner
             # reduce v2: an OPTIONAL new_stop trails the SURVIVOR's stop in the SAME directive
             # (bank-and-trail), reusing the tighten-only/short-of-mark guard.

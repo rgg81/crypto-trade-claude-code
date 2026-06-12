@@ -4,7 +4,7 @@ from datetime import datetime
 from pathlib import Path
 
 from futures_fund.flat_journal import read_flat_decisions
-from futures_fund.journal import read_all_decisions
+from futures_fund.journal import read_all_decisions, realized_total
 from futures_fund.lessons import append_lesson
 
 _WINNER_THRESHOLD = 0.0  # strict: only strictly-positive realized PnL is a win (breakeven = loss)
@@ -16,8 +16,8 @@ def reflection_payload(memory_dir) -> dict:
     'DO take it when X' lessons — not only loss-avoidance rules. `missed_opportunities` are the
     edge-aligned flats that, on evaluation, moved our way (standing aside cost the desk)."""
     closed = [d for d in read_all_decisions(memory_dir) if d.get("realized_pnl") is not None]
-    winners = [d for d in closed if d["realized_pnl"] > _WINNER_THRESHOLD]
-    losers = [d for d in closed if d["realized_pnl"] <= _WINNER_THRESHOLD]
+    winners = [d for d in closed if realized_total(d) > _WINNER_THRESHOLD]   # incl. partial banks
+    losers = [d for d in closed if realized_total(d) <= _WINNER_THRESHOLD]
     flats = read_flat_decisions(memory_dir)
     declined = [f for f in flats if f.get("edge_aligned")]
     missed = [f for f in declined if f.get("evaluated") and f.get("flat_cost_us")]

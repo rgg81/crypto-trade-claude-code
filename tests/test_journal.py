@@ -125,3 +125,14 @@ def test_patch_cross_month_boundary(tmp_path):
     rec = next(r for r in read_all_decisions(tmp_path) if r["id"] == did)
     assert rec["realized_pnl"] == 55.0
     assert rec["rationale"] == "momentum breakout"  # Phase-1 preserved across the patch
+
+
+def test_decision_banked_in_cycle_idempotency_guard(tmp_path):
+    # cy78 review [1]: the guard that stops a DUE RETRY from re-banking a reduce.
+    from futures_fund.orchestration import _decision_banked_in_cycle
+    did = append_decision(tmp_path, _decision(direction="short"))
+    assert _decision_banked_in_cycle(tmp_path, did, 22) is False
+    append_partial_bank(tmp_path, did, {"pnl": 119.45, "cycle": 22})
+    assert _decision_banked_in_cycle(tmp_path, did, 22) is True     # already banked this cycle
+    assert _decision_banked_in_cycle(tmp_path, did, 23) is False    # a different cycle is fine
+    assert _decision_banked_in_cycle(tmp_path, "missing", 22) is False

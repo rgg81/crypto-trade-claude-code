@@ -125,6 +125,12 @@ def patch_outcome(memory_dir, decision_id: str, outcome: dict) -> bool:
                     rm = _r_multiple(merged_dict)
                     if rm is not None:
                         merged_dict["r_multiple"] = rm
+                # Classify the WIN on TRUE realized (final close + partial banks) so a trade that
+                # banked a winning slice but whose runner closed sub-zero isn't mislabeled a loss
+                # (cy78 review). Only override when banks exist; a plain close keeps caller's value.
+                if (merged_dict.get("realized_pnl") is not None
+                        and merged_dict.get("partial_banks")):
+                    merged_dict["prediction_correct"] = realized_total(merged_dict) > 0
                 # validate the merged record so outcome types are coerced (e.g. datetimes)
                 merged = Decision.model_validate(merged_dict)
                 r.clear()

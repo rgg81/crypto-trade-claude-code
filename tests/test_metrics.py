@@ -88,3 +88,26 @@ def test_agent_attribution_sums_pnl_and_hit_rate_per_agent():
     assert attr["research_manager"]["count"] == 2
     assert attr["research_manager"]["hit_rate"] == pytest.approx(0.5)
     assert attr["baseline"]["pnl"] == pytest.approx(6.0)
+
+
+def test_realized_total_classifies_trimmed_winner_with_subzero_runner_as_win():
+    # cy78 review [0]: a trade that banked a winning slice (partial_banks) but whose RUNNER closed
+    # slightly negative must count as a WIN with its TOTAL realized — not a loss on the runner.
+    trimmed = {"symbol": "SOLUSDT", "direction": "short", "entry": 80.0, "stop": 82.0, "size": 10.0,
+               "realized_pnl": -5.0, "partial_banks": [{"pnl": 119.45, "cycle": 22}]}  # total +114.45
+    plain_loss = {"symbol": "BTCUSDT", "direction": "long", "entry": 100.0, "stop": 95.0,
+                  "size": 1.0, "realized_pnl": -10.0}
+    closed = [trimmed, plain_loss]
+    assert hit_rate(closed) == 0.5                         # trimmed is a WIN, not a loss
+    # profit_factor: gains 114.45 / losses 10.0
+    assert profit_factor(closed) == pytest.approx(114.45 / 10.0)
+    att = agent_attribution([{**trimmed, "contributing_agents": ["derivatives"]}])
+    assert att["derivatives"]["pnl"] == pytest.approx(114.45) and att["derivatives"]["wins"] == 1
+
+
+def test_reconstruct_r_uses_total_realized_for_scaled_trade():
+    from futures_fund.playbook_scorecard import reconstruct_r
+    rec = {"entry": 80.0, "stop": 82.0, "size": 10.0, "realized_pnl": -5.0,
+           "partial_banks": [{"pnl": 119.45, "cycle": 22}]}   # risk = 10*2 = 20; total +114.45
+    _g, net_r = reconstruct_r(rec)
+    assert net_r == pytest.approx(114.45 / 20.0)             # positive R, not -0.25

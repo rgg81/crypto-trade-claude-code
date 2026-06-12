@@ -16,7 +16,7 @@ from futures_fund.costs import count_funding_events
 from futures_fund.executor import close_at_mark, open_position, reconcile
 from futures_fund.exits import detect_exit
 from futures_fund.hitrate import hit_rate, record_outcome
-from futures_fund.journal import append_decision, patch_outcome, read_all_decisions
+from futures_fund.journal import append_decision, patch_outcome, read_all_decisions, realized_total
 from futures_fund.liquidation import liquidation_price, mmr_for_notional
 from futures_fund.memory_layout import ensure_memory_layout
 from futures_fund.models import TradeProposal
@@ -61,7 +61,10 @@ def fetch_context(exchange, settings: Settings) -> CycleContext:
 
 
 def _recent_returns(memory_dir, equity: float) -> list[float]:
-    pnls = [d["realized_pnl"] for d in read_all_decisions(memory_dir)
+    # TRUE realized (final close + partial banks) so a scaled-out trade isn't undercounted (cy78
+    # review). Feeds cvar_risk_multiplier, which keys off the NEGATIVE tail, so a more-accurate
+    # (less-undercounted) winner can only DE-RISK or leave unchanged — weakens no limit.
+    pnls = [realized_total(d) for d in read_all_decisions(memory_dir)
             if d.get("realized_pnl") is not None]
     return [p / equity for p in pnls[-30:]] if equity > 0 else []
 
@@ -287,7 +290,11 @@ def execute_proposals(  # noqa: PLR0912
             continue
         fr = ctx.fundings[sym]
         n_events = count_funding_events(p.opened_ts, now, int(fr.interval_hours))
-        ct = close_at_mark(p, ctx.prices[p.symbol], funding_rate=fr.current_rate,
+        # Effective (entry+exit average) funding rate — the cy78 sign fix, applied to the RM-CLOSE/
+        # reconcile path too (not just the stop/TP/liq path) so all three close paths agree.
+        eff_rate = _effective_funding_rate(_entry_funding_rate(memory_dir, p.decision_id),
+                                           fr.current_rate)
+        ct = close_at_mark(p, ctx.prices[p.symbol], funding_rate=eff_rate,
                            funding_events=n_events, slippage_bps=_SLIPPAGE_BPS)
         account.balance += ct.realized_pnl
         report["closed"] += 1

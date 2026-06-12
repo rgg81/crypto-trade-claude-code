@@ -6,7 +6,7 @@ from pathlib import Path
 
 from futures_fund.equity_log import equity_series, returns_series
 from futures_fund.graduation import deflated_sharpe_pvalue, graduation_verdict
-from futures_fund.journal import read_all_decisions
+from futures_fund.journal import read_all_decisions, realized_total
 from futures_fund.metrics import (
     agent_attribution,
     hit_rate,
@@ -104,7 +104,7 @@ def build_scorecard(state_dir, memory_dir, monthly_target: float = 0.05,
     for d in closed:
         notional = (d.get("size") or 0.0) * (d.get("entry") or 0.0)
         if notional > 0:
-            per_symbol[d["symbol"]].append(d["realized_pnl"] / notional)
+            per_symbol[d["symbol"]].append(realized_total(d) / notional)   # incl. partial banks
     sigma_sr = trial_sharpe_std(list(per_symbol.values()))
     # conservative fixed trial count (not cycle count)
     dsr = deflated_sharpe_pvalue(rets, num_trials=10, sigma_sr=sigma_sr)

@@ -28,7 +28,7 @@ import math
 import statistics
 from pathlib import Path
 
-from futures_fund.journal import read_all_decisions
+from futures_fund.journal import read_all_decisions, realized_total
 from futures_fund.vendor.overfit_detector import holm_correction
 
 MIN_N = 8            # decided trades a bucket needs to surface a number (rr_floor precedent)
@@ -58,7 +58,10 @@ def reconstruct_r(rec: dict) -> tuple[float | None, float | None]:
     size*|entry-stop|; net_r = realized_pnl/risk; gross_r adds back fees + funding so fee drag is
     visible, not a structural tilt-to-caution. Drops a non-finite / zero-risk / un-closed record."""
     entry, stop, size = rec.get("entry"), rec.get("stop"), rec.get("size")
-    pnl = rec.get("realized_pnl")
+    # Use the TRUE realized (final close + partial banks) so a scaled-out trade isn't undercounted
+    # (cy78 review: realized_total was wired into only _r_multiple; every other consumer read
+    # realized_pnl alone and undercounted/misclassified every trimmed trade).
+    pnl = realized_total(rec) if rec.get("realized_pnl") is not None else None
     if not (_finite(entry) and _finite(stop) and _finite(size) and _finite(pnl)):
         return None, None
     risk = abs(size) * abs(entry - stop)

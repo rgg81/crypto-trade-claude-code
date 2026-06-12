@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from futures_fund.journal import realized_total  # TRUE realized incl. partial banks (cy78 review)
+
 PERIODS_PER_YEAR = 2190.0  # 4h cycles: 6/day * 365
 
 
@@ -61,13 +63,13 @@ def calmar(annual_return: float, mdd: float) -> float:
 def hit_rate(closed: list[dict]) -> float:
     if not closed:
         return 0.0
-    wins = sum(1 for d in closed if d["realized_pnl"] > 0)
+    wins = sum(1 for d in closed if realized_total(d) > 0)
     return wins / len(closed)
 
 
 def profit_factor(closed: list[dict]) -> float:
-    gains = sum(d["realized_pnl"] for d in closed if d["realized_pnl"] > 0)
-    losses = -sum(d["realized_pnl"] for d in closed if d["realized_pnl"] < 0)
+    gains = sum(realized_total(d) for d in closed if realized_total(d) > 0)
+    losses = -sum(realized_total(d) for d in closed if realized_total(d) < 0)
     if losses == 0:
         return float("inf") if gains > 0 else 0.0
     return gains / losses
@@ -81,9 +83,10 @@ def agent_attribution(closed: list[dict]) -> dict[str, dict]:
         agents = d.get("contributing_agents") or ["unknown"]
         for a in agents:
             rec = out.setdefault(a, {"pnl": 0.0, "count": 0, "wins": 0})
-            rec["pnl"] += d["realized_pnl"]
+            tot = realized_total(d)
+            rec["pnl"] += tot
             rec["count"] += 1
-            rec["wins"] += 1 if d["realized_pnl"] > 0 else 0
+            rec["wins"] += 1 if tot > 0 else 0
     for rec in out.values():
         rec["hit_rate"] = rec["wins"] / rec["count"] if rec["count"] else 0.0
     return out
