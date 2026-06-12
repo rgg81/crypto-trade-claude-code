@@ -94,7 +94,7 @@ def test_realized_total_classifies_trimmed_winner_with_subzero_runner_as_win():
     # cy78 review [0]: a trade that banked a winning slice (partial_banks) but whose RUNNER closed
     # slightly negative must count as a WIN with its TOTAL realized — not a loss on the runner.
     trimmed = {"symbol": "SOLUSDT", "direction": "short", "entry": 80.0, "stop": 82.0, "size": 10.0,
-               "realized_pnl": -5.0, "partial_banks": [{"pnl": 119.45, "cycle": 22}]}  # total +114.45
+               "realized_pnl": -5.0, "partial_banks": [{"pnl": 119.45, "cycle": 22}]}  # tot +114.45
     plain_loss = {"symbol": "BTCUSDT", "direction": "long", "entry": 100.0, "stop": 95.0,
                   "size": 1.0, "realized_pnl": -10.0}
     closed = [trimmed, plain_loss]
