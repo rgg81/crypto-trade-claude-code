@@ -83,14 +83,27 @@ def evaluate_pending_flats(memory_dir, marks: dict[str, float], now: datetime,
             continue
         m0, sym = r.get("mark"), r.get("symbol")
         m1 = marks.get(sym)
-        if not m0 or not m1:
+        dcyc = r.get("cycle")
+        overdue = (now_cycle is not None and dcyc is not None
+                   and (now_cycle - dcyc) >= eval_after_cycles)
+        if not m0 or m1 is None:
+            # Un-repriceable this cycle (symbol dropped from the universe -> absent from marks).
+            # Don't let it REPLAY its stale snapshot forever (the cy37 ZEC bug, 41 cycles): once
+            # well past the horizon, FINALIZE on the last running peak (None peak -> never moved ->
+            # no cost, so it can't wrongly indict the conservatism). Recent ones stay pending.
+            if overdue and m0:
+                mm = r.get("max_favored_move")
+                r.update({"evaluated": True, "eval_mark": None, "stale_unrepriced": True,
+                          "favored_move_pct": mm,
+                          "flat_cost_us": (mm is not None and mm >= min_move)})
+                n += 1
+                dirty = True
             continue
         side = r.get("favored_side", "long")
         move = (m1 - m0) / m0 * (1.0 if side == "long" else -1.0)
         prev_max = r.get("max_favored_move")
         max_move = move if prev_max is None else max(prev_max, move)
-        dcyc = r.get("cycle")
-        ready = now_cycle is None or dcyc is None or (now_cycle - dcyc) >= eval_after_cycles
+        ready = now_cycle is None or dcyc is None or overdue
         if ready:
             r.update({"evaluated": True, "eval_mark": m1,
                       "eval_ts": now.isoformat() if hasattr(now, "isoformat") else now,

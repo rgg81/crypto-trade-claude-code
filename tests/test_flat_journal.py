@@ -105,3 +105,27 @@ def test_short_horizon_bounce_no_longer_locks_verdict(tmp_path):
                            now_cycle=15, eval_after_cycles=6)   # trend down 15% -> cost us
     r = read_flat_decisions(tmp_path)[0]
     assert r["evaluated"] is True and r["flat_cost_us"] is True
+
+
+def test_overdue_unrepriceable_flat_finalizes_instead_of_replaying(tmp_path):
+    # cy78 P1c: a pending flat whose symbol DROPPED from the universe (absent from marks) can never
+    # re-price or finalize -> it replayed its stale snapshot forever (the cy37 ZEC bug, 41 cycles).
+    # Once well past the horizon it must FINALIZE (on the last running peak), not replay.
+    append_flat_decision(tmp_path, _flat("ZECUSDT", side="long", mark=316.30, cycle=37),
+                         ts=datetime(2026, 5, 31, tzinfo=UTC))
+    # cycle 80, ZEC NOT in this cycle's marks -> overdue + un-repriceable -> finalize
+    n = evaluate_pending_flats(tmp_path, {"BTCUSDT": 64000.0}, datetime(2026, 6, 1, tzinfo=UTC),
+                               now_cycle=80, eval_after_cycles=6)
+    assert n == 1
+    row = read_flat_decisions(tmp_path)[0]
+    assert row["evaluated"] is True and row.get("stale_unrepriced") is True
+    # a never-moved stale flat did NOT cost us -> must not wrongly indict the conservatism
+    assert row["flat_cost_us"] is False
+
+
+def test_recent_unrepriceable_flat_stays_pending(tmp_path):
+    # not yet overdue + un-repriceable -> still pending (don't finalize prematurely)
+    append_flat_decision(tmp_path, _flat("ZECUSDT", cycle=79), ts=datetime(2026, 5, 31, tzinfo=UTC))
+    n = evaluate_pending_flats(tmp_path, {"BTCUSDT": 64000.0}, datetime(2026, 6, 1, tzinfo=UTC),
+                               now_cycle=80, eval_after_cycles=6)
+    assert n == 0 and read_flat_decisions(tmp_path)[0]["evaluated"] is False
