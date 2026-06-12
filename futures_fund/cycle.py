@@ -77,7 +77,12 @@ def audit_and_reflect(ctx: CycleContext, positions: list[Position], account: Acc
             still_open.append(p)
             report["carried"] += 1
             continue
-        bar = ctx.frames[sym].iloc[-1]
+        # Exits read the latest COMPLETED candle (mirrors the trigger path's last_completed_frame —
+        # cy77 fix). The OHLCV feed's iloc[-1] is the still-FORMING candle, snapshotted near its
+        # open; a stop/TP wick landing later in a candle would fall into the completed iloc[-2] row
+        # next cycle and never be checked, dodging a fill a live resting order would have taken.
+        cdf = last_completed_frame(ctx.frames[sym], now, ctx.settings.timeframe)
+        bar = cdf.iloc[-1]
         fr = ctx.fundings[sym]
         n_events = count_funding_events(p.opened_ts, now, int(fr.interval_hours))
         ct = detect_exit(p, bar_high=float(bar["high"]), bar_low=float(bar["low"]),

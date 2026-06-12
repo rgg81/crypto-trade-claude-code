@@ -795,7 +795,8 @@ def gate_execute_step(exchange, settings: Settings, state_dir, memory_dir,
     for raw, uni in ctx.raw_to_unified.items():
         # A stop_entry/limit_entry must fire off the latest COMPLETED 4h bar — NOT the still-forming
         # candle the OHLCV feed returns as iloc[-1] (its transient close flips on every tick). Drop
-        # the forming candle so triggers evaluate a real CLOSE. (ctx.prices keeps iloc[-1] for exits.)
+        # the forming candle so triggers evaluate a real CLOSE — exits read the same completed bar
+        # (cy77 fix); ctx.prices keeps iloc[-1] only for mark-to-market equity.
         df = last_completed_frame(ctx.frames.get(uni), now, settings.timeframe)
         if df is None or not len(df):
             continue

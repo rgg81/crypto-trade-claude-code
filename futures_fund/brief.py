@@ -14,8 +14,8 @@ def last_completed_frame(df, now: datetime | None, timeframe: str = "4h"):
     last COMPLETED bar — not a transient intra-candle print. The OHLCV feed returns the in-progress
     candle (open-ts == the current window) as the last row; if `now` falls inside that window, that
     row is dropped. An already-closed last candle (or no `now`) is left untouched, and a single-row
-    frame is never emptied. ctx.prices keeps the live last row for EXITS — only completed-bar
-    consumers call this."""
+    frame is never emptied. ctx.prices keeps the live last row for MARK-TO-MARKET equity; trigger
+    AND exit evaluation both call this so they read the same completed bar (cy77 fix)."""
     if df is None or not len(df) or now is None or len(df) < 2:
         return df
     try:
