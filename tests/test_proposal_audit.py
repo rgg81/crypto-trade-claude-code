@@ -84,3 +84,18 @@ def test_audit_batch_partitions_and_tags_reason():
     assert {k["symbol"] for k in kept} == {"AAA", "CCC"}
     assert [d["symbol"] for d in dropped] == ["BBB"]
     assert "_audit_reason" in dropped[0]
+
+
+def test_ground_truth_lookup_is_symbol_shape_agnostic():
+    # cy78 backlog: ground_truth is keyed by the RAW exchange id, but a proposal may carry the
+    # UNIFIED symbol. The audit must match either shape — else the cy78 hallucination ($185 vs
+    # real $387) fails-OPEN through the backstop on a unified-symbol proposal.
+    gt_raw = {"XMRUSDT": {"mark": 387.0, "atr": 20.0}}
+    unified_fab = {"symbol": "XMR/USDT:USDT", "entry": 185.0, "atr": 20.0}   # 52% off = fabrication
+    assert audit_item(unified_fab, gt_raw, is_trigger=False)[0] is False     # DROPPED not fail-open
+    unified_ok = {"symbol": "XMR/USDT:USDT", "entry": 384.0, "atr": 20.0}    # ~0.8% off -> ok
+    assert audit_item(unified_ok, gt_raw, is_trigger=False)[0] is True
+    # mirror: unified-keyed ground_truth vs a raw-symbol proposal
+    gt_uni = {"XMR/USDT:USDT": {"mark": 387.0, "atr": 20.0}}
+    raw_fab = {"symbol": "XMRUSDT", "entry": 185.0, "atr": 20.0}
+    assert audit_item(raw_fab, gt_uni, is_trigger=False)[0] is False

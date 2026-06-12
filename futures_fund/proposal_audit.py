@@ -13,6 +13,8 @@ limits still apply. Symmetric: identical treatment for longs and shorts.
 """
 from __future__ import annotations
 
+from futures_fund.symbols import sym_key
+
 ENTRY_TOL_MARKET = 0.05    # a MARKET open's entry must be within 5% of the brief's last_close
 TRIGGER_TOL = 0.25         # a breakout/breakdown TRIGGER level may sit further (<=25%) from mark
 ATR_LO, ATR_HI = 0.4, 2.5  # agent atr must be within [0.4x, 2.5x] the brief's computed atr
@@ -51,10 +53,25 @@ def audit_atr(atr, brief_atr) -> tuple[bool, str]:
     return True, ""
 
 
+def _lookup_gt(ground_truth: dict, symbol) -> dict | None:
+    """Shape-agnostic ground-truth lookup: match the item's symbol against the gt keys whether each
+    side is the RAW id (XMRUSDT) or the UNIFIED id (XMR/USDT:USDT). Exact match first (fast path),
+    then a normalized fallback — so a unified-symbol proposal can't slip past audit fail-open."""
+    gt_map = ground_truth or {}
+    hit = gt_map.get(symbol)
+    if hit is not None:
+        return hit
+    want = sym_key(symbol)
+    for k, v in gt_map.items():
+        if sym_key(k) == want:
+            return v
+    return None
+
+
 def audit_item(item: dict, ground_truth: dict, *, is_trigger: bool) -> tuple[bool, str]:
-    """Cross-check one proposal/trigger dict vs `ground_truth` = {<raw symbol>: {"mark","atr"}}.
-    Returns (ok, reason). A symbol with no ground-truth entry is FAIL-OPEN (kept)."""
-    gt = (ground_truth or {}).get(item.get("symbol"))
+    """Cross-check one proposal/trigger dict vs `ground_truth` = {<symbol>: {"mark","atr"}} (keys
+    may be raw OR unified). Returns (ok, reason). No ground-truth for a symbol -> FAIL-OPEN."""
+    gt = _lookup_gt(ground_truth, item.get("symbol"))
     if not gt:
         return True, ""
     # Audit the level the order ACTUALLY rests/fires at: `trigger_level` for a trigger, `entry` for

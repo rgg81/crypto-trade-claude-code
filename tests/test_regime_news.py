@@ -418,6 +418,27 @@ def test_funnel_skipped_false_on_standdown_no_trades():
     assert funnel_skipped(None, None, None) is False
 
 
+# ---- cy77 dict-of-agent-lists shape: the guards must SEE it like the consumers (review fix) ----
+
+def test_reclassify_skipped_true_on_cy77_dict_shape_with_news():
+    # a cy77 dict-of-agent-lists carrying a real news pass + a preflight-only regime (no fold) ->
+    # the guard must still fire (it was list-only blind to this shape before the fix).
+    rs = {"regime": "risk_off", "drivers": {"news_risk_off": None}}
+    cy77 = {"technical": [{"symbol": "BTCUSDT", "stance": "bullish", "conviction": 0.5}],
+            "news": [{"symbol": "BTCUSDT", "stance": "bearish", "conviction": 0.6,
+                      "signals": {"risk_off_flag": 1}}]}
+    assert reclassify_skipped(rs, cy77) is True
+
+
+def test_funnel_skipped_true_on_cy77_dict_with_zero_real_reports():
+    # an empty-but-truthy dict ({"technical": [], "news": []}) must NOT count as a real analyst pass
+    empty_dict = {"technical": [], "news": []}
+    assert funnel_skipped(empty_dict, [{"symbol": "X"}], []) is True
+    # but a cy77 dict WITH real reports is a present pass -> not skipped
+    populated = {"news": [{"symbol": "BTCUSDT", "stance": "bearish", "conviction": 0.6}]}
+    assert funnel_skipped(populated, [{"symbol": "X"}], []) is False
+
+
 # ---- Sticky/decaying news shock: an unresolved shock must not lapse when its headline ages off ----
 
 from futures_fund.regime_news import (  # noqa: E402

@@ -352,7 +352,11 @@ def reclassify_skipped(regime_state, analyst_reports) -> bool:
         return False  # Phase 4.6 explicitly ran (even if it folded to a degraded None)
     if drivers.get("news_risk_off") is not None:
         return False  # news judged True/False -> folded (backward-compat for pre-marker contexts)
-    reports = analyst_reports if isinstance(analyst_reports, list) else []
+    # Normalize so a cy77 dict-of-agent-lists is scanned for news reports just like the consumers
+    # it guards (else this fail-loud guard goes BLIND to the exact mis-shape the backlog made
+    # tolerable, and a skipped news-fold on that shape would execute on a stale, news-blind regime).
+    from futures_fund.analyst_assembly import normalize_reports
+    reports = normalize_reports(analyst_reports)
     return any(isinstance(r, dict) and r.get("agent") == "news" for r in reports)
 
 
@@ -364,18 +368,22 @@ def funnel_skipped(analyst_reports, proposals, triggers) -> bool:
     reclassify_skipped (which catches a skipped news-FOLD only when the reports DO exist) — closing
     the gap that let an entirely-skipped funnel pass silently on a news-blind preflight regime."""
     has_trades = bool(proposals) or bool(triggers)
-    return has_trades and not analyst_reports
+    # Measure 'no analyst pass' on the NORMALIZED payload: a cy77 dict-of-agent-lists is truthy even
+    # when it carries ZERO real reports ({"technical": [], "news": []}), which would let trades pass
+    # the guard with an effectively-empty funnel. normalize_reports([]/garbage) -> [] preserves the
+    # absent/None behavior.
+    from futures_fund.analyst_assembly import normalize_reports
+    return has_trades and not normalize_reports(analyst_reports)
 
 
 def screen_step(reports, top_n: int = 5) -> list[str]:
-    """Phase 4.5: aggregate analyst reports -> top-N symbols. Tolerates a dict-wrapped
-    payload ({"reports": [...]}) so a natural orchestrator wrapping doesn't crash cryptically."""
+    """Phase 4.5: aggregate analyst reports -> top-N symbols. Robust to shape (cy77 backlog): a flat
+    list, a {"reports": [...]} wrapper, OR a dict-of-agent-lists all canonicalize to the same
+    AnalystReport-valid items via `canonicalize_lenient` — so a mis-shaped payload screens correctly
+    instead of silently returning EMPTY (the cy77 footgun where a hand-shaped dict screened []) ."""
+    from futures_fund.analyst_assembly import canonicalize_lenient
     from futures_fund.contracts import AnalystReport
-    if isinstance(reports, dict):
-        reports = reports.get("reports", [])
-    if not isinstance(reports, list):
-        raise TypeError(f"analyst reports must be a flat list, got {type(reports).__name__}")
-    parsed = [AnalystReport.model_validate(r) for r in reports]
+    parsed = [AnalystReport.model_validate(r) for r in canonicalize_lenient(reports)]
     return screen_reports(parsed, top_n)
 
 

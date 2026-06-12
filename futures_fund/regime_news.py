@@ -61,7 +61,11 @@ def aggregate_news_risk_off(analyst_reports, briefs=None, warnings=None) -> bool
         # The feed itself being down beats any (possibly stale) flagged report -> degraded.
         if any(isinstance(w, str) and "news feed" in w for w in warns):
             return None
-        reports = analyst_reports if isinstance(analyst_reports, list) else []
+        # Robust to shape (cy77 backlog): a flat list, a {"reports": [...]} wrapper, OR a
+        # dict-of-agent-lists all flatten to agent-tagged items (recovering a desk-wide news flag) —
+        # so a hand-shaped dict no longer SILENTLY degrades the news fold to None.
+        from futures_fund.analyst_assembly import normalize_reports
+        reports = normalize_reports(analyst_reports)
         news = [r for r in reports if isinstance(r, dict) and r.get("agent") == "news"]
         if not news:
             return None  # analyst news pass absent -> degraded (today's behavior)
