@@ -63,20 +63,35 @@ def score_lesson(lesson: Lesson, now: datetime, query_tags: list[str],
     return w_rec * recency + w_imp * importance + w_rel * relevance
 
 
-def retrieve_lessons(memory_dir, now: datetime, regime: str | None,
+def _regime_applies(lz_regime: str | None, query) -> bool:
+    """A lesson applies when it is UNIVERSAL (regime None or the literal 'any') or its tag matches
+    one of the query contexts. cy77/78 fix: `query` may be a single regime string OR an iterable of
+    contexts (the symbol QUADRANT 'high_vol_trend' AND the desk ENGINE label 'risk_off'), since the
+    corpus mixes both vocabularies — matching only the quadrant stranded the 50 risk_off-tagged edge
+    lessons and the 11 'any' lessons on the common path."""
+    if lz_regime in (None, "any"):
+        return True
+    if query is None:
+        return False
+    accept = {query} if isinstance(query, str) else {q for q in query if q}
+    return lz_regime in accept
+
+
+def retrieve_lessons(memory_dir, now: datetime, regime,
                      query_tags: list[str], k: int = 5,
                      max_restrictive: int = 3) -> list[Lesson]:
-    """Regime-filter FIRST (a lesson with regime=None applies everywhere), rank by score, then
+    """Regime-filter FIRST (a lesson with regime None/'any' applies everywhere), rank by score, then
     apply a POLARITY QUOTA so the injected set is two-sided: VALIDATED lessons (standing rules)
     are always kept; >=1 enabling lesson is force-included when any exists; and restrictive
     *fills* are capped at `max_restrictive` so a losing record's prohibitions can't monopolize
     every debate. Retired lessons excluded.
 
-    NOTE: passing regime=None as the QUERY matches only universal (lz.regime is None) lessons,
-    NOT all lessons; pass a regime string to also include lessons tagged to that regime."""
+    `regime` is the query CONTEXT(S): a single regime string OR an iterable of contexts (pass BOTH
+    the symbol quadrant and the desk engine label so risk-state-tagged lessons surface — see
+    `_regime_applies`). Passing None matches only universal lessons."""
     candidates = [
         lz for lz in read_lessons(memory_dir)
-        if lz.state != "retired" and (lz.regime is None or lz.regime == regime)
+        if lz.state != "retired" and _regime_applies(lz.regime, regime)
     ]
     candidates.sort(key=lambda lz: score_lesson(lz, now, query_tags), reverse=True)
 

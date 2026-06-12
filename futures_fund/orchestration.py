@@ -702,6 +702,7 @@ def gate_execute_step(exchange, settings: Settings, state_dir, memory_dir,
         proposals = []
 
     # --- Holdings review: trail stops on HOLDs, collect the explicit CLOSE set ---------------
+    from futures_fund.journal import append_partial_bank
     has_review = management is not None
     management = management or []
     by_raw = {}
@@ -751,11 +752,19 @@ def gate_execute_step(exchange, settings: Settings, state_dir, memory_dir,
                 reduce_warnings.append(f"reduce noop (dust) {p.symbol}")
                 survivor = p  # nothing banked; the un-reduced position survives
             else:  # "reduced": bank the slice, carry the runner
-                account.balance += res.closed_trade.realized_pnl
+                ct = res.closed_trade
+                account.balance += ct.realized_pnl
                 reduced += 1
-                banked_pnl += res.closed_trade.realized_pnl
+                banked_pnl += ct.realized_pnl
                 reduce_actions.append({"reduce": p.symbol, "fraction": frac,
-                                       "pnl": res.closed_trade.realized_pnl, "full": False})
+                                       "pnl": ct.realized_pnl, "full": False})
+                # Journal the banked slice to its parent decision (cy78 fix) so the scale-out's cash
+                # is captured, not lost — realized_total() then reconstructs the trade's TRUE PnL.
+                if p.decision_id:
+                    append_partial_bank(memory_dir, p.decision_id, {
+                        "pnl": ct.realized_pnl, "fees": ct.exit_fee, "funding": ct.funding,
+                        "slippage": ct.slippage, "fraction": frac, "price": ct.exit_price,
+                        "qty": ct.qty, "ts": now})
                 survivor = res.runner
             # reduce v2: an OPTIONAL new_stop trails the SURVIVOR's stop in the SAME directive
             # (bank-and-trail), reusing the tighten-only/short-of-mark guard.
@@ -1113,8 +1122,10 @@ def reflect_step(memory_dir) -> dict:
     return reflection_payload(memory_dir)
 
 
-def lessons_step(memory_dir, now, regime: str | None, tags: list[str], k: int = 5) -> list[dict]:
+def lessons_step(memory_dir, now, regime, tags: list[str], k: int = 5) -> list[dict]:
     """Retrieve the top-K regime-relevant lessons (as JSON dicts) for injection into the
-    debate/trader subagent prompts, so the team learns from past decisions (spec §6)."""
+    debate/trader subagent prompts, so the team learns from past decisions (spec §6). `regime` is
+    the query CONTEXT(S) — pass BOTH the symbol quadrant AND the desk engine label (a string or an
+    iterable) so risk-state-tagged lessons aren't stranded (cy77/78 retrospective fix)."""
     from futures_fund.lessons import retrieve_lessons
     return [lz.model_dump(mode="json") for lz in retrieve_lessons(memory_dir, now, regime, tags, k)]

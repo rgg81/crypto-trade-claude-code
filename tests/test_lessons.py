@@ -53,6 +53,34 @@ def test_retrieve_filters_by_regime_then_ranks_top_k(tmp_path):
     assert "range lesson" not in texts    # wrong regime filtered out
 
 
+def test_retrieve_matches_engine_label_and_quadrant_and_any(tmp_path):
+    # cy77/78 retrospective P0: 50 lessons are tagged with the ENGINE label ('risk_off') and 11 with
+    # 'any', but SKILL passes the symbol QUADRANT ('high_vol_trend') as the query — so they were all
+    # STRANDED. Retrieval must accept BOTH contexts (quadrant + engine label) and treat 'any' as
+    # universal, so a risk_off edge lesson surfaces in a risk_off cycle regardless of quadrant.
+    now = datetime(2026, 5, 2, tzinfo=UTC)
+    append_lesson(tmp_path, _lesson(text="risk_off edge", regime="risk_off", tags=["flush"]),
+                  ts=now - timedelta(hours=2))
+    append_lesson(tmp_path, _lesson(text="quadrant lesson", regime="high_vol_trend", tags=["t"]),
+                  ts=now - timedelta(hours=2))
+    append_lesson(tmp_path, _lesson(text="any lesson", regime="any", tags=["x"]),
+                  ts=now - timedelta(hours=2))
+    append_lesson(tmp_path, _lesson(text="risk_on only", regime="risk_on", tags=["y"]),
+                  ts=now - timedelta(hours=2))
+    # query carries BOTH the engine label and the symbol quadrant
+    got = retrieve_lessons(tmp_path, now=now, regime=["risk_off", "high_vol_trend"],
+                           query_tags=["flush"], k=10)
+    texts = [lz.text for lz in got]
+    assert "risk_off edge" in texts        # engine-label match (was stranded before)
+    assert "quadrant lesson" in texts      # quadrant match
+    assert "any lesson" in texts           # 'any' is universal (was stranded before)
+    assert "risk_on only" not in texts     # a non-matching desk regime is still excluded
+    # a single-string regime still works (back-compat)
+    single = retrieve_lessons(tmp_path, now=now, regime="risk_off", query_tags=["flush"], k=10)
+    assert "risk_off edge" in [lz.text for lz in single]
+    assert "quadrant lesson" not in [lz.text for lz in single]   # only the matched context
+
+
 def test_retrieve_respects_top_k(tmp_path):
     now = datetime(2026, 5, 2, tzinfo=UTC)
     for i in range(10):

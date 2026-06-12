@@ -49,6 +49,11 @@ class Decision(BaseModel):
     low_level_lesson: str | None = None
     high_level_lesson: str | None = None
     importance_1_10: int | None = None
+    # Partial scale-out banks (cy78 fix): each {pnl, fees, funding, fraction, price, ts}. The TRUE
+    # realized for the trade is realized_pnl (final close) PLUS the sum of these — without this a
+    # scale-out's banked cash was invisible to the journal (cy22 SOL +$119 cost the desk's best
+    # short 44% of its record). Read the complete realized via realized_total().
+    partial_banks: list[dict] = Field(default_factory=list)
 
 
 def _episodic_dir(memory_dir) -> Path:
@@ -121,3 +126,39 @@ def patch_outcome(memory_dir, decision_id: str, outcome: dict) -> bool:
             f.write_text("".join(json.dumps(r) + "\n" for r in records))
             return True
     return False
+
+
+def append_partial_bank(memory_dir, decision_id: str, bank: dict) -> bool:
+    """APPEND a partial scale-out bank to its parent decision's `partial_banks` list (cy78 fix) so
+    the slice's realized cash is captured rather than lost — the runner's final close still patches
+    `realized_pnl` separately. `bank` carries {pnl, fees, funding, fraction, price, ts}. Returns
+    False if the id is not found. Mirrors patch_outcome's monthly-file rewrite."""
+    for f in _all_files(memory_dir):
+        records = [json.loads(line) for line in f.read_text().splitlines() if line.strip()]
+        hit = False
+        for r in records:
+            if r.get("id") == decision_id:
+                banks = list(r.get("partial_banks") or [])
+                banks.append(json.loads(json.dumps(bank, default=str)))   # JSON-safe (ts etc.)
+                merged = Decision.model_validate({**r, "partial_banks": banks})
+                r.clear()
+                r.update(json.loads(merged.model_dump_json()))
+                hit = True
+                break
+        if hit:
+            f.write_text("".join(json.dumps(r) + "\n" for r in records))
+            return True
+    return False
+
+
+def realized_total(decision: dict) -> float:
+    """The TRUE realized PnL of a (possibly scaled-out) trade: the final-close `realized_pnl` PLUS
+    every partial-bank slice. Reading `realized_pnl` alone understates any trade that was scaled out
+    (cy22 SOL was 44% invisible). Safe on raw dicts; absent/None fields contribute 0."""
+    total = decision.get("realized_pnl") or 0.0
+    for b in (decision.get("partial_banks") or []):
+        try:
+            total += float(b.get("pnl") or 0.0)
+        except (TypeError, ValueError):
+            continue
+    return total
