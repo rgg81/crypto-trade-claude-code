@@ -2,6 +2,7 @@ from datetime import UTC, datetime, timedelta
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from futures_fund.brief import build_symbol_brief
 
@@ -59,6 +60,31 @@ def test_brief_has_expected_keys_and_types():
 def test_brief_momentum_positive_on_uptrend():
     b = build_symbol_brief(FakeExchange(_uptrend()), "BTC/USDT:USDT")
     assert b["momentum_20"] > 0
+
+
+def test_funding_direction_helper_is_unambiguous():
+    # cy78 fix: two agents inverted the funding sign. The brief must carry an explicit PAYER so no
+    # agent has to interpret the raw sign. Convention: rate>0 -> longs pay shorts; rate<0 -> shorts
+    # pay longs; rate==0 -> none. annualized% = rate * (24/interval) * 365 * 100, signed.
+    from futures_fund.brief import funding_direction
+    assert funding_direction(0.0001, 8.0) == ("longs", pytest.approx(10.95, abs=0.1))
+    assert funding_direction(-0.000968, 8.0)[0] == "shorts"
+    assert funding_direction(-0.000968, 8.0)[1] == pytest.approx(-105.99, abs=0.2)
+    assert funding_direction(0.0, 8.0) == ("none", 0.0)
+    # the TRX case that bit us: NEGATIVE rate -> SHORTS pay -> a short position has a carry DRAG
+    payer, _ = funding_direction(-0.000968, 8.0)
+    assert payer == "shorts"          # a SHORT pays; a LONG receives — never the inverse
+
+
+def test_brief_carries_explicit_funding_payer_and_annualized():
+    # positive funding (FakeExchange default +0.0001) => longs pay shorts
+    b = build_symbol_brief(FakeExchange(_uptrend(), funding_rate=0.0001), "BTC/USDT:USDT")
+    assert b["funding_payer"] == "longs"
+    assert b["funding_annualized_pct"] == pytest.approx(10.95, abs=0.1)
+    # negative funding => shorts pay longs (the TRX trap)
+    bn = build_symbol_brief(FakeExchange(_uptrend(), funding_rate=-0.000968), "BTC/USDT:USDT")
+    assert bn["funding_payer"] == "shorts"
+    assert bn["funding_annualized_pct"] < 0
 
 
 def test_brief_includes_derivatives_signals():

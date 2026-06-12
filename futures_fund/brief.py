@@ -9,6 +9,24 @@ _TF_SECONDS = {"15m": 900, "1h": 3600, "4h": 14400, "1d": 86400}
 OI_REACTIVE_LOOKBACK = 4   # completed 4h bars back (~16h) for the trigger OI-gate's reactive window
 
 
+def funding_direction(rate: float, interval_hours: float) -> tuple[str, float]:
+    """Resolve a raw funding rate into an UNAMBIGUOUS (payer, annualized_pct) pair so agents never
+    have to interpret the sign — the cy78 trap, where two analysts inverted it and called a TRX
+    short (negative funding) a carry tailwind when a short there PAYS ~106%/yr.
+
+    Convention (standard perp): rate>0 => longs pay shorts ('longs'); rate<0 => shorts pay longs
+    ('shorts'); rate==0 => 'none'. So the named side PAYS (a carry DRAG) and the other RECEIVES.
+    annualized_pct = rate * (24/interval_hours) * 365 * 100, SIGNED (keeps the raw direction)."""
+    try:
+        if not math.isfinite(rate) or not interval_hours or not math.isfinite(interval_hours):
+            return ("none", 0.0)
+        annual = rate * (24.0 / interval_hours) * 365.0 * 100.0
+        payer = "longs" if rate > 0 else ("shorts" if rate < 0 else "none")
+        return (payer, annual)
+    except Exception:  # noqa: BLE001 — never break the brief over funding housekeeping
+        return ("none", 0.0)
+
+
 def last_completed_frame(df, now: datetime | None, timeframe: str = "4h"):
     """Drop the still-FORMING last candle so 'last close', momentum, and trigger evaluation read the
     last COMPLETED bar — not a transient intra-candle print. The OHLCV feed returns the in-progress
@@ -157,6 +175,12 @@ def build_symbol_brief(exchange, symbol: str, timeframe: str = "4h",
         "dist_to_swing_low_pct": round((last - swing_low) / last, 4) if last else None,
         "funding_rate": float(funding.current_rate),
         "funding_interval_hours": float(funding.interval_hours),
+        # Explicit, sign-proof funding direction (cy78 fix): funding_payer is the side that PAYS
+        # (a carry DRAG); the other side RECEIVES. Read THIS — never infer carry from funding_rate.
+        "funding_payer": funding_direction(float(funding.current_rate),
+                                           float(funding.interval_hours))[0],
+        "funding_annualized_pct": funding_direction(float(funding.current_rate),
+                                                    float(funding.interval_hours))[1],
         "mark_price": float(funding.mark_price),
         **_derivatives(exchange, symbol, timeframe, now=now),
     }
