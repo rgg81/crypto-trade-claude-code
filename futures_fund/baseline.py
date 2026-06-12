@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 
 from futures_fund.models import RegimeState, TradeProposal
@@ -8,7 +9,14 @@ _EMA_SPAN = 20
 _ATR_PERIOD = 14
 _ATR_MULT = 2.0
 _RR = 2.0
-_TREND_EPS = 0.0005  # min |ema slope / price| per bar to call a trend
+# Trend/vol thresholds CALIBRATED to the ~median of the live 4h crypto-alt distribution (cy78
+# retrospective fix): the old 0.0005/0.01 sat in the deep tail (81%/62% of bars exceeded them), so
+# simple_regime labeled ~89% 'trend' / ~88% 'high_vol' and the 2x2 grid collapsed to one cell — the
+# range/mean-reversion playbook could NEVER fire. ~50th-percentile thresholds split the grid roughly
+# evenly so all four quadrants are reachable. (Callers may pass universe-relative thresholds; see
+# universe_regime_thresholds.)
+_TREND_EPS = 0.0016  # min |ema slope / price| per bar to call a trend (~55th pct of the live dist)
+_VOL_HIGH = 0.012    # min recent return std to call high-vol (~median of the live dist)
 
 
 def _atr(df: pd.DataFrame, period: int = _ATR_PERIOD) -> float:
@@ -94,20 +102,46 @@ def swing_levels(df: pd.DataFrame, lookback: int = 20) -> tuple[float, float]:
         return last, last
 
 
-def simple_regime(df: pd.DataFrame) -> RegimeState:
+def simple_regime(df: pd.DataFrame, *, trend_thr: float = _TREND_EPS,
+                  vol_thr: float = _VOL_HIGH) -> RegimeState:
+    """Classify a symbol's 4h regime into the trend/range x low/high-vol grid. `trend_thr`/`vol_thr`
+    default to the data-calibrated constants; a caller may pass universe-relative thresholds (from
+    universe_regime_thresholds) for a grid that stays balanced as the distribution drifts."""
     close = df["close"]
     ema = close.ewm(span=_EMA_SPAN, adjust=False).mean()
     slope = (ema.iloc[-1] - ema.iloc[-6]) / 5.0
     norm_slope = slope / close.iloc[-1]
     vol = float(close.pct_change().tail(_EMA_SPAN).std())
-    trending = abs(norm_slope) > _TREND_EPS
-    high_vol = vol > 0.01
+    trending = abs(norm_slope) > trend_thr
+    high_vol = vol > vol_thr
     direction = "up" if norm_slope > 0 else "down" if norm_slope < 0 else "neutral"
     if trending:
         quadrant = "high_vol_trend" if high_vol else "low_vol_trend"
     else:
         quadrant = "high_vol_range" if high_vol else "low_vol_range"
     return RegimeState(quadrant=quadrant, trend_direction=direction)
+
+
+def universe_regime_thresholds(frames: dict, slope_pctl: float = 50.0,
+                               vol_pctl: float = 50.0) -> tuple[float, float]:
+    """Universe-relative (trend_thr, vol_thr): the requested percentile of the per-bar |norm EMA
+    slope| and recent return-std pooled across ALL symbols' frames — so simple_regime's grid is
+    'balanced by construction' against the live distribution rather than fixed constants. Falls back
+    to the calibrated defaults on too-little data. Pass the result into simple_regime per symbol."""
+    aslopes, vols = [], []
+    for df in (frames or {}).values():
+        try:
+            close = df["close"]
+            ema = close.ewm(span=_EMA_SPAN, adjust=False).mean()
+            ns = ((ema - ema.shift(5)) / 5.0 / close).abs().dropna()
+            v = close.pct_change().rolling(_EMA_SPAN).std().dropna()
+            aslopes.extend(ns.to_numpy(dtype=float))
+            vols.extend(v.to_numpy(dtype=float))
+        except Exception:  # noqa: BLE001 — a malformed frame must not break regime calibration
+            continue
+    trend_thr = float(np.percentile(aslopes, slope_pctl)) if len(aslopes) >= 30 else _TREND_EPS
+    vol_thr = float(np.percentile(vols, vol_pctl)) if len(vols) >= 30 else _VOL_HIGH
+    return trend_thr, vol_thr
 
 
 def propose(symbol: str, df: pd.DataFrame, funding_rate: float,

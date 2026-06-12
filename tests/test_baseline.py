@@ -23,6 +23,44 @@ def test_simple_regime_returns_regimestate():
                           "high_vol_range", "transition"}
 
 
+def test_simple_regime_all_four_quadrants_reachable():
+    # cy78 fix: with recalibrated/explicit thresholds the 2x2 grid must not collapse to one cell.
+    # Drive each quadrant by crafting slope (trend vs flat) x vol (noisy vs calm) with explicit thr.
+    strong = _trend_df(slope=1.5, noise=0.02)     # steep, calm
+    flat = _trend_df(slope=0.0, noise=0.02)       # flat, calm
+    noisy_strong = _trend_df(slope=1.5, noise=3.0)  # steep, noisy
+    noisy_flat = _trend_df(slope=0.0, noise=3.0)    # flat, noisy
+    # generous trend_thr/vol_thr so the crafted extremes land in the intended cells deterministic
+    assert simple_regime(strong, trend_thr=0.001, vol_thr=0.05).quadrant == "low_vol_trend"
+    assert simple_regime(flat, trend_thr=0.001, vol_thr=0.05).quadrant == "low_vol_range"
+    assert simple_regime(noisy_strong, trend_thr=0.001, vol_thr=0.005).quadrant == "high_vol_trend"
+    assert simple_regime(noisy_flat, trend_thr=0.5, vol_thr=0.005).quadrant == "high_vol_range"
+
+
+def test_recalibrated_default_does_not_collapse_the_grid():
+    # across a spread of slopes+noise the DEFAULT thresholds must spread across multiple quadrants,
+    # not pin ~everything to high_vol_trend (the pre-fix failure: 89% one cell).
+    import collections
+    rng = np.random.default_rng(7)
+    quads = collections.Counter()
+    for _ in range(80):
+        slope = rng.uniform(-1.2, 1.2)
+        noise = rng.uniform(0.02, 2.5)
+        quads[simple_regime(_trend_df(slope=slope, noise=noise, n=80)).quadrant] += 1
+    # no single quadrant may dominate (>70%), and >=3 of the 4 quadrants must appear
+    assert max(quads.values()) <= 0.70 * sum(quads.values())
+    assert len([q for q, c in quads.items() if c > 0]) >= 3
+
+
+def test_universe_regime_thresholds_are_percentiles_with_fallback():
+    from futures_fund.baseline import _TREND_EPS, _VOL_HIGH, universe_regime_thresholds
+    frames = {f"S{i}": _trend_df(slope=0.1 * i, noise=0.2 * (i + 1), n=120) for i in range(10)}
+    t, v = universe_regime_thresholds(frames)
+    assert t > 0 and v > 0
+    # too-little data -> calibrated-constant fallback
+    assert universe_regime_thresholds({}) == (_TREND_EPS, _VOL_HIGH)
+
+
 def test_propose_long_on_clean_uptrend():
     p = propose("BTCUSDT", _trend_df(0.8), funding_rate=0.0, horizon_hours=4)
     assert isinstance(p, TradeProposal)
