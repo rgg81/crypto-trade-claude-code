@@ -2,7 +2,41 @@
 `proposals` channel must be RE-ROUTED to `triggers`, never silently mangled (cy70 regression: a
 with-regime stop_entry in `proposals` opened as a no-op market entry, a counter-regime one was
 dropped). `split_misrouted_resting` is pure; the gate surfaces the reroute LOUD."""
-from futures_fund.orchestration import split_misrouted_resting
+from futures_fund.orchestration import normalize_trigger_level, split_misrouted_resting
+
+
+def test_normalize_trigger_level_keeps_existing():
+    d = {"symbol": "X", "trigger_level": 5.0}
+    assert normalize_trigger_level(d) == d
+
+
+def test_normalize_trigger_level_maps_trigger_price():
+    # cy84 bug: the Trader emitted a SOL stop_entry with `trigger_price` (not `trigger_level`),
+    # so PendingOrder ingestion raised and the trigger was SILENTLY dropped (SOL never armed).
+    d = {"symbol": "SOLUSDT", "direction": "long", "kind": "stop_entry", "trigger_price": 68.85}
+    out = normalize_trigger_level(d)
+    assert out["trigger_level"] == 68.85
+    assert d.get("trigger_level") is None  # input not mutated (shallow copy)
+
+
+def test_normalize_trigger_level_maps_entry_when_no_trigger():
+    d = {"symbol": "X", "entry": 7.0}
+    assert normalize_trigger_level(d)["trigger_level"] == 7.0
+
+
+def test_normalize_trigger_level_priority_and_passthrough():
+    # explicit trigger_level wins over the synonyms; non-dict / no-key inputs pass through unchanged
+    both = {"trigger_level": 1.0, "trigger_price": 2.0}
+    assert normalize_trigger_level(both)["trigger_level"] == 1.0
+    assert normalize_trigger_level({"symbol": "X"}) == {"symbol": "X"}
+    assert normalize_trigger_level(None) is None
+
+
+def test_split_misrouted_resting_normalizes_trigger_price():
+    p = {"symbol": "X", "direction": "long", "kind": "stop_entry",
+         "trigger_price": 7.0, "stop": 6.0, "take_profits": [9.0]}
+    _market, _triggers, rerouted = split_misrouted_resting([p], [])
+    assert rerouted[0]["trigger_level"] == 7.0
 
 
 def test_market_proposals_pass_through_untouched():

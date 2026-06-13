@@ -188,6 +188,38 @@ def test_gate_counter_regime_trigger_not_clobbered_by_trader_trigger(tmp_path):
     assert report["triggers_armed"] == 1 and len(load_pending_orders(state_dir)) == 1
 
 
+def test_gate_trigger_price_synonym_is_armed_not_dropped(tmp_path):
+    # cy84 bug: the Trader emitted a stop_entry with `trigger_price` (not `trigger_level`); the
+    # PendingOrder ingestion raised and the trigger was SILENTLY dropped (SOL never armed). The
+    # arming loop now normalizes the synonym so the resting order is honored.
+    state_dir, memory_dir = tmp_path / "s", tmp_path / "m"
+    ex = FakeExchange({"BTC/USDT:USDT": _uptrend()})
+    last = _pf(state_dir, memory_dir, ex)["briefs"][0]["last_close"]
+    # with-regime long breakout above mark, level under `trigger_price` not `trigger_level`
+    trig = {"symbol": "BTCUSDT", "direction": "long", "kind": "stop_entry",
+            "trigger_price": last + 10.0, "stop": last + 5.0, "take_profits": [last + 30.0],
+            "atr": 2.0, "expires_cycle": 4}
+    report = gate_execute_step(ex, _settings(), state_dir, memory_dir, now=NOW, cycle_no=1,
+                               proposals=[], regime_state=_regime("risk_on"), triggers=[trig])
+    assert report["triggers_armed"] == 1 and report.get("triggers_malformed_dropped", 0) == 0
+    orders = load_pending_orders(state_dir)
+    assert any(o.symbol == "BTCUSDT" and o.trigger_level == last + 10.0 for o in orders)
+
+
+def test_gate_malformed_trigger_dropped_loud(tmp_path):
+    # a trigger that cannot be validated (no usable level, missing required fields) must be dropped
+    # LOUD — counted + warned — never silently swallowed (Rule 6 fail-loud).
+    state_dir, memory_dir = tmp_path / "s", tmp_path / "m"
+    ex = FakeExchange({"BTC/USDT:USDT": _uptrend()})
+    last = _pf(state_dir, memory_dir, ex)["briefs"][0]["last_close"]
+    bad = {"symbol": "BTCUSDT", "direction": "long", "kind": "stop_entry"}  # no level/stop/TP
+    report = gate_execute_step(ex, _settings(), state_dir, memory_dir, now=NOW, cycle_no=1,
+                               proposals=[], regime_state=_regime("risk_on"), triggers=[bad])
+    assert report["triggers_malformed_dropped"] == 1 and report["triggers_armed"] == 0
+    assert any("malformed" in w for w in report.get("warnings", []))
+    assert last  # last_close fixture used (silences unused-var lint)
+
+
 def test_gate_fires_armed_long_trigger(tmp_path):
     state_dir, memory_dir = tmp_path / "s", tmp_path / "m"
     ex = FakeExchange({"BTC/USDT:USDT": _uptrend()})

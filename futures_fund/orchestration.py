@@ -403,6 +403,23 @@ def management_review(payload: dict) -> list[dict]:
 _RESTING_KINDS = frozenset({"stop_entry", "limit_entry"})
 
 
+def normalize_trigger_level(d):
+    """Populate `trigger_level` from the first present of `trigger_level | trigger_price | entry`.
+
+    A Trader/agent may emit the firing price under any of these synonyms — cy84 the Trader wrote a
+    SOL stop_entry with `trigger_price`, so PendingOrder ingestion (which requires `trigger_level`)
+    raised and the trigger was SILENTLY dropped (SOL never armed). Returns a shallow COPY when it
+    adds the key; passes a non-dict or already-populated dict through unchanged (never mutates)."""
+    if not isinstance(d, dict) or d.get("trigger_level") is not None:
+        return d
+    for k in ("trigger_price", "entry"):
+        if d.get(k) is not None:
+            t = dict(d)
+            t["trigger_level"] = d[k]
+            return t
+    return d
+
+
 def split_misrouted_resting(proposals, triggers):
     """A resting conditional order (kind stop_entry/limit_entry) belongs in the `triggers` channel;
     `proposals` is the MARKET-intent channel (the gate picks market-vs-trigger by regime). A resting
@@ -420,10 +437,7 @@ def split_misrouted_resting(proposals, triggers):
     market, rerouted = [], []
     for p in (proposals or []):
         if isinstance(p, dict) and p.get("kind") in _RESTING_KINDS:
-            t = dict(p)
-            if t.get("trigger_level") is None and t.get("entry") is not None:
-                t["trigger_level"] = t["entry"]
-            rerouted.append(t)
+            rerouted.append(normalize_trigger_level(p))
         else:
             market.append(p)
     return market, list(triggers or []) + rerouted, rerouted
@@ -1004,30 +1018,38 @@ def gate_execute_step(exchange, settings: Settings, state_dir, memory_dir,
     cr_keys = {(o.symbol, o.direction, o.kind) for o in cr_armed}
     armed_collisions = 0
     geometry_dropped = 0
+    malformed_dropped = 0
     if not halted:
         from futures_fund.pending_orders import PendingOrder, stop_entry_wrong_side_of_mark
         for t in (triggers or []):
             try:
-                fields = {**t, "created_cycle": cycle_no,
+                # cy84: a Trader/agent may emit the firing price as trigger_price/entry — normalize
+                # to trigger_level so a synonym does not silently fail PendingOrder ingestion (the
+                # SOL @68.85 `trigger_price` case, which was dropped with no count and no warning).
+                fields = {**normalize_trigger_level(t), "created_cycle": cycle_no,
                           "expires_cycle": int(t.get("expires_cycle", cycle_no + 3))}
                 po = _stamp_anchor_swing(PendingOrder.model_validate(fields), swings_by_symbol)
-                if (po.symbol, po.direction, po.kind) in cr_keys:
-                    armed_collisions += 1
-                    continue  # don't clobber the counter-regime safety trigger
-                # cy80 fix: a stop_entry placed on the WRONG SIDE of the mark (a short breakdown at/
-                # above mark, a long breakout at/below) has no break room and would fire off the
-                # next close with no genuine break (the BNB @611 case). Drop it fail-loud.
-                _mk = ctx.prices.get(po.symbol)
-                if stop_entry_wrong_side_of_mark(po, _mk):
-                    geometry_dropped += 1
-                    report.setdefault("warnings", []).append(
-                        f"trigger {po.symbol} {po.direction} {po.kind} @{po.trigger_level} wrong "
-                        f"side of mark {_mk} -> dropped (no break room)")
-                    continue
-                new_triggers.append(po)
-            except Exception:  # noqa: BLE001 — drop a malformed trigger, keep the rest
-                pass
+            except Exception:  # noqa: BLE001 — drop a malformed trigger LOUD, keep the rest
+                malformed_dropped += 1
+                report.setdefault("warnings", []).append(
+                    f"trigger dropped: malformed/invalid ({t!r})")
+                continue
+            if (po.symbol, po.direction, po.kind) in cr_keys:
+                armed_collisions += 1
+                continue  # don't clobber the counter-regime safety trigger
+            # cy80 fix: a stop_entry placed on the WRONG SIDE of the mark (a short breakdown at/
+            # above mark, a long breakout at/below) has no break room and would fire off the
+            # next close with no genuine break (the BNB @611 case). Drop it fail-loud.
+            _mk = ctx.prices.get(po.symbol)
+            if stop_entry_wrong_side_of_mark(po, _mk):
+                geometry_dropped += 1
+                report.setdefault("warnings", []).append(
+                    f"trigger {po.symbol} {po.direction} {po.kind} @{po.trigger_level} wrong "
+                    f"side of mark {_mk} -> dropped (no break room)")
+                continue
+            new_triggers.append(po)
     report["triggers_geometry_dropped"] = geometry_dropped
+    report["triggers_malformed_dropped"] = malformed_dropped
     # cancel is AUTHORITATIVE: a canceled key must not be re-armed this cycle, even by a cr-safety
     # conversion or a restated Trader trigger. Strip them so triggers_armed reflects the real store.
     if cancel_triggers:
