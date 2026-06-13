@@ -5,9 +5,29 @@ from datetime import UTC, datetime
 
 from futures_fund.flat_journal import (
     append_flat_decision,
+    coerce_flat_verdicts,
     evaluate_pending_flats,
     read_flat_decisions,
 )
+
+
+def test_coerce_flat_verdicts_accepts_bare_list():
+    rows = [{"symbol": "XRPUSDT", "rating": "flat"}]
+    assert coerce_flat_verdicts(rows) == rows
+
+
+def test_coerce_flat_verdicts_unwraps_wrapper_dict():
+    rows = [{"symbol": "XRPUSDT", "rating": "flat"}]
+    # the orchestrator mis-wrapping the file as {"flat_verdicts": [...]} must not crash the stage
+    assert coerce_flat_verdicts({"flat_verdicts": rows}) == rows
+    assert coerce_flat_verdicts({"verdicts": rows}) == rows
+
+
+def test_coerce_flat_verdicts_empty_and_garbage_are_safe():
+    assert coerce_flat_verdicts({}) == []
+    assert coerce_flat_verdicts(None) == []
+    # a wrapper whose payload is not a list yields empty, never a str-iteration crash
+    assert coerce_flat_verdicts({"flat_verdicts": "oops"}) == []
 
 
 def _flat(symbol, *, edge=True, side="long", mark=100.0, cycle=9):
@@ -52,15 +72,18 @@ def test_short_side_favored_move_sign(tmp_path):
 
 
 def test_non_edge_aligned_flats_are_not_evaluated(tmp_path):
-    append_flat_decision(tmp_path, _flat("DOGEUSDT", edge=False), ts=datetime(2026, 5, 31, tzinfo=UTC))
+    append_flat_decision(tmp_path, _flat("DOGEUSDT", edge=False),
+                         ts=datetime(2026, 5, 31, tzinfo=UTC))
     n = evaluate_pending_flats(tmp_path, {"DOGEUSDT": 200.0}, datetime(2026, 5, 31, 4, tzinfo=UTC))
     assert n == 0 and read_flat_decisions(tmp_path)[0]["evaluated"] is False
 
 
 def test_evaluate_is_idempotent(tmp_path):
-    append_flat_decision(tmp_path, _flat("XLMUSDT", mark=100.0), ts=datetime(2026, 5, 31, tzinfo=UTC))
+    append_flat_decision(tmp_path, _flat("XLMUSDT", mark=100.0),
+                         ts=datetime(2026, 5, 31, tzinfo=UTC))
     evaluate_pending_flats(tmp_path, {"XLMUSDT": 105.0}, datetime(2026, 5, 31, 4, tzinfo=UTC))
-    again = evaluate_pending_flats(tmp_path, {"XLMUSDT": 110.0}, datetime(2026, 5, 31, 8, tzinfo=UTC))
+    again = evaluate_pending_flats(tmp_path, {"XLMUSDT": 110.0},
+                                   datetime(2026, 5, 31, 8, tzinfo=UTC))
     assert again == 0  # already evaluated, not re-scored
 
 

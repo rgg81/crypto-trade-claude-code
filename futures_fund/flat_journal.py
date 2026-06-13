@@ -18,6 +18,24 @@ def _store(memory_dir) -> Path:
     return Path(memory_dir) / "flat-decisions.jsonl"
 
 
+def coerce_flat_verdicts(data) -> list[dict]:
+    """Normalize the orchestrator's flat_verdicts.json payload to a list of verdict dicts.
+
+    The documented contract is a BARE LIST, but the orchestrator can easily mis-wrap it as
+    {"flat_verdicts": [...]} (or {"verdicts": [...]}) — which previously crashed the journal
+    stage with a 'str object is not a mapping' error (iterating dict keys). Tolerate both shapes,
+    and fail SAFE (empty list) on anything un-coercible, so a single mis-shape never aborts a
+    cycle's why-flat accountability. Mirrors the self-healing normalize_reports contract."""
+    if isinstance(data, list):
+        return [v for v in data if isinstance(v, dict)]
+    if isinstance(data, dict):
+        for key in ("flat_verdicts", "verdicts"):
+            inner = data.get(key)
+            if isinstance(inner, list):
+                return [v for v in inner if isinstance(v, dict)]
+    return []
+
+
 def append_flat_decision(memory_dir, fields: dict, ts: datetime) -> str:
     """Record a FLAT verdict. Expected fields: cycle, symbol, regime, rating, reason,
     edge_aligned (bool — did it match the crowded-short squeeze-long edge?), favored_side

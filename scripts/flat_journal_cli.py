@@ -17,7 +17,7 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 
-from futures_fund.flat_journal import append_flat_decision
+from futures_fund.flat_journal import append_flat_decision, coerce_flat_verdicts
 
 
 def main() -> None:
@@ -28,7 +28,7 @@ def main() -> None:
     if not p.exists():
         print(json.dumps({"recorded": 0, "note": "no flat_verdicts.json"}))
         return
-    verdicts = json.loads(p.read_text())
+    verdicts = coerce_flat_verdicts(json.loads(p.read_text()))
     now = datetime.now(UTC)
     ids = []
     for v in verdicts:
