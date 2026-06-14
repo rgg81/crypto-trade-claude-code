@@ -400,6 +400,25 @@ def management_review(payload: dict) -> list[dict]:
     return [] if m is None else m
 
 
+def unmatched_management_symbols(management, held_raw, raw_resolver) -> list[str]:
+    """Management entries whose (resolved) symbol matches NO open position.
+
+    The gate's management loop iterates OPEN positions and looks up a matching management entry,
+    so a directive for a symbol the desk does not hold is a SILENT no-op — the intended close/
+    trail/reduce never happens. That is exactly the cy90 cross-reference class (an RM/Trader plan
+    that names the wrong symbol/direction). Surface it LOUD (Rule 6 fail-loud) rather than swallow
+    it. `raw_resolver(symbol)` maps a unified/loose symbol to its raw form before matching. Pure;
+    returns the original (un-resolved) symbol strings so the warning is legible."""
+    out = []
+    for m in (management or []):
+        if not isinstance(m, dict):
+            continue
+        s = m.get("symbol", "")
+        if raw_resolver(s) not in held_raw:
+            out.append(s)
+    return out
+
+
 _RESTING_KINDS = frozenset({"stop_entry", "limit_entry"})
 
 
@@ -736,6 +755,13 @@ def gate_execute_step(exchange, settings: Settings, state_dir, memory_dir,
     for m in management:
         s = m.get("symbol", "")
         by_raw[s if s in ctx.specs_by_raw else unified_to_raw.get(s, s)] = m
+    # cy90 fail-loud: a management directive for a symbol the desk does NOT hold is a silent no-op
+    # (the intended close/trail never runs) — capture it here and surface it LOUD on the report
+    # below (Rule 6), rather than swallow the wrong-symbol/wrong-direction cross-reference class
+    # the verifiers keep catching. (report is created later by execute_proposals.)
+    _unmatched_mgmt = unmatched_management_symbols(
+        management, {p.symbol for p in positions},
+        lambda s: s if s in ctx.specs_by_raw else unified_to_raw.get(s, s))
     force_close, trailed = set(), 0
     reduced, banked_pnl, reduce_dropped = 0, 0.0, 0
     reduce_actions, reduce_warnings = [], []
@@ -996,6 +1022,10 @@ def gate_execute_step(exchange, settings: Settings, state_dir, memory_dir,
         report.setdefault("warnings", []).extend(
             f"AUDIT dropped {d.get('symbol')} ({d.get('_audit_reason')})" for d in audit_dropped)
     report["trailed"] = trailed
+    report["management_unmatched"] = len(_unmatched_mgmt)  # cy90 fail-loud (silent no-op surfaced)
+    for _s in _unmatched_mgmt:
+        report.setdefault("warnings", []).append(
+            f"management entry for {_s} matches NO open position — ignored (Rule 6 fail-loud)")
     report["halted"] = halted  # closed_by_review is set by execute_proposals (actual, not intent)
     report["reduced"] = reduced
     report["banked_pnl"] = banked_pnl
