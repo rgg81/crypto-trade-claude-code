@@ -206,3 +206,36 @@ def statistically_promote(memory_dir, lesson_id: str, *, dsr_pvalue: float,
     if hit:
         _write_all(memory_dir, lessons)
     return hit
+
+
+def _scoring_ids(scoring: dict, key: str) -> list[str]:
+    """Extract lesson ids from a `lesson_scoring` block's `confirm`/`demote` list. Each entry may be
+    a bare id string or a {"id": ..., "why": ...} dict (the Reflector emits the dict form)."""
+    out: list[str] = []
+    for item in (scoring.get(key) or []):
+        lid = item.get("id") if isinstance(item, dict) else item
+        if lid:
+            out.append(lid)
+    return out
+
+
+def apply_lesson_scoring(memory_dir, scoring: dict | None, *, dsr_pvalue: float) -> dict:
+    """Apply the Reflector's per-cycle lesson-confirmation scoring deterministically (#255). For
+    each `confirm` id, run the DSR-gated `statistically_promote` (a confirmation always counts; a
+    candidate graduates to VALIDATED only at count>=5 AND dsr_pvalue>=0.95). For each `demote` id,
+    run `demote_lesson`. Replaces the orchestrator hand-running promote_lesson_cli per id. Unknown
+    ids are reported in `not_found`. An empty/None scoring block is a safe no-op."""
+    result: dict[str, list[str]] = {"confirmed": [], "demoted": [], "not_found": []}
+    if not scoring:
+        return result
+    for lid in _scoring_ids(scoring, "confirm"):
+        if statistically_promote(memory_dir, lid, dsr_pvalue=dsr_pvalue):
+            result["confirmed"].append(lid)
+        elif lid not in result["not_found"]:
+            result["not_found"].append(lid)
+    for lid in _scoring_ids(scoring, "demote"):
+        if demote_lesson(memory_dir, lid):
+            result["demoted"].append(lid)
+        elif lid not in result["not_found"]:
+            result["not_found"].append(lid)
+    return result
