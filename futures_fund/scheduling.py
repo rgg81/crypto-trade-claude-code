@@ -88,6 +88,35 @@ def _served_candle(report_path: Path, now_utc: datetime) -> datetime | None:
     return cand
 
 
+def last_served_candle(state_dir, now_utc: datetime) -> datetime | None:
+    """The served candle (report['candle'] = floor4(gate-start)) of the most-recent COMPLETED cycle
+    — the highest cycle dir whose report.json parses, found by the SAME descending scan +
+    `_served_candle` as `cycle_due`. This is the FLOOR of the missed-candle gap window
+    (futures_fund.replay): the last candle the gate processed before this run. As the current cycle
+    audits exits its own report.json does not yet exist, so this returns the PRIOR cycle's candle —
+    exactly the gap floor; a RETRY (no/garbled report on the current dir) is skipped, so the retry
+    re-processes the same floor idempotently. Returns None on cold start or any error (fail-safe:
+    the caller then checks only the latest single bar = today's behavior). Never raises."""
+    try:
+        cyc = Path(state_dir) / "cycle"
+        if not cyc.exists():
+            return None
+        dirs = sorted(
+            (int(p.name) for p in cyc.glob("*") if p.is_dir() and p.name.isdigit()),
+            reverse=True,
+        )
+        for n in dirs:
+            rp = cyc / str(n) / "report.json"
+            if not rp.exists():
+                continue  # crashed/in-flight (incl. THIS cycle pre-report): not a completed cycle
+            cand = _served_candle(rp, now_utc)
+            if cand is not None:
+                return cand
+        return None
+    except Exception:  # noqa: BLE001 — fail-safe: no floor -> single-bar check (today's behavior)
+        return None
+
+
 def cycle_due(state_dir, now_utc: datetime) -> tuple[str, int, str]:
     """Decide whether the candle containing `now_utc` still needs a cycle. Never raises."""
     try:

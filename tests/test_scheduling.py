@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from futures_fund.scheduling import cycle_due, floor4
+from futures_fund.scheduling import cycle_due, floor4, last_served_candle
 
 UTC = timezone.utc
 
@@ -295,3 +295,33 @@ def test_foreign_offset_ran_at_normalized_to_utc(tmp_path):
     # 13:57+05:30 == 08:27 UTC -> served candle 08:00; at 09:07 (boundary 08:00) that is SKIP.
     _write_report(tmp_path, 7, ran_at="2026-05-31T13:57:00+05:30")  # no candle field
     assert cycle_due(tmp_path, _dt("2026-05-31T09:07:00+00:00"))[0] == "SKIP"
+
+
+# --------------------------------------------------- last_served_candle (missed-candle gap floor)
+
+def test_last_served_candle_cold_start_is_none(tmp_path):
+    # no cycle dir at all -> None (caller then checks only the latest single bar, today's behavior)
+    assert last_served_candle(tmp_path, _dt("2026-03-01T00:07:00+00:00")) is None
+
+
+def test_last_served_candle_returns_highest_parsing_report_candle(tmp_path):
+    _write_report(tmp_path, 1, candle="2026-02-28T12:00:00+00:00")
+    _write_report(tmp_path, 2, candle="2026-02-28T16:00:00+00:00")
+    got = last_served_candle(tmp_path, _dt("2026-03-01T00:07:00+00:00"))
+    assert got == _dt("2026-02-28T16:00:00+00:00")  # most-recent completed cycle's served candle
+
+
+def test_last_served_candle_skips_current_dir_without_report(tmp_path):
+    # at audit time THIS cycle's report.json does not yet exist -> the bare dir is skipped and the
+    # PRIOR cycle's served candle is returned (= the gap floor); a RETRY re-processes idempotently.
+    _write_report(tmp_path, 1, candle="2026-02-28T12:00:00+00:00")
+    _bare_dir(tmp_path, 2)  # current in-flight cycle: dir exists, no report.json
+    got = last_served_candle(tmp_path, _dt("2026-03-01T00:07:00+00:00"))
+    assert got == _dt("2026-02-28T12:00:00+00:00")
+
+
+def test_last_served_candle_skips_garbled_current_report(tmp_path):
+    _write_report(tmp_path, 1, candle="2026-02-28T12:00:00+00:00")
+    _write_report(tmp_path, 2, raw="{not json")  # crashed mid-write -> unparseable
+    got = last_served_candle(tmp_path, _dt("2026-03-01T00:07:00+00:00"))
+    assert got == _dt("2026-02-28T12:00:00+00:00")
