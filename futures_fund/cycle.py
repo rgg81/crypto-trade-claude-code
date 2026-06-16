@@ -22,6 +22,7 @@ from futures_fund.memory_layout import ensure_memory_layout
 from futures_fund.models import TradeProposal
 from futures_fund.policy import caps_for, circuit_breaker
 from futures_fund.portfolio import portfolio_health
+from futures_fund.profit_lock import ratcheted_stop
 from futures_fund.risk_gate import GateInputs, evaluate
 from futures_fund.rr_floor import effective_rr_floor, load_rr_floor
 from futures_fund.state import (
@@ -350,6 +351,23 @@ def execute_proposals(  # noqa: PLR0912
         mmr, maint = mmr_for_notional(pos.qty * pos.entry, spec.mmr_brackets)
         liq = liquidation_price(pos.entry, pos.qty, pos.margin, pos.direction, mmr, maint)
         pos = pos.model_copy(update={"liq_price": liq})
+        # Fire-time profit-lock ladder (#268). A position opens AFTER the management stage, so the
+        # RM cannot trail it until NEXT cycle. Ratchet its stop toward profit NOW from the firing
+        # candle's favorable excursion (deterministic, no LLM), and record the ORIGINAL stop in
+        # entry_stop. This protects a freshly-fired deep-in-profit position through the gap to the
+        # next management cycle / an outage (the cy97 BTC +1.6R -> -1.12R round-trip). Carried
+        # positions are NOT touched here — they are the RM's to manage. TIGHTEN-ONLY via
+        # ratcheted_stop -> STRENGTHENS the safety path, never loosens.
+        _usym = ctx.raw_to_unified.get(pos.symbol)
+        _orig_stop, _ratchet = pos.stop, None
+        if _usym is not None:
+            _fb = last_completed_frame(ctx.frames[_usym], now, ctx.settings.timeframe).iloc[-1]
+            _ratchet = ratcheted_stop(pos.direction, pos.entry, _orig_stop, _orig_stop,
+                                      float(_fb["high"]), float(_fb["low"]), float(_fb["close"]))
+        pos = pos.model_copy(update={"entry_stop": _orig_stop,
+                                     "stop": _ratchet if _ratchet is not None else _orig_stop})
+        if _ratchet is not None:
+            report["profit_locks_ratcheted"] = report.get("profit_locks_ratcheted", 0) + 1
         account.balance -= entry_fee
         keep.append(pos)
         report["opened"] += 1

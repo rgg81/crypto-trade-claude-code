@@ -70,20 +70,29 @@ Behavioral contract:
   early rung; the tighten-only wiring guard below makes even that safe.)
 - Direction-symmetric (mirror for short).
 
-### 2. `cycle.py` wiring — PROTECTED (the one authorized edit, ~6 lines)
+### 2. `cycle.py` wiring — PROTECTED (the one authorized edit)
 
-For each open position, **before** `detect_exit`:
+**As-built placement (refined during implementation):** the ratchet lives in `execute_proposals`'
+OPEN loop, immediately after `open_position`, and runs **only on freshly-opened positions** — i.e.
+true *fire-time*. This is stronger than the spec's first sketch (a lazy set in `audit_and_reflect`
+before `detect_exit`, which runs *before* fires and so would not see a freshly-fired position until
+the next cycle — by which point the firing-candle excursion is gone). Critically, it does **not**
+touch carried positions, so the RM's deliberate manual trail is never overridden.
 
 ```python
-# Fire-time profit-lock ladder (deterministic, tighten-only — STRENGTHENS the safety path).
-if p.entry_stop is None:
-    p.entry_stop = p.stop                       # first sight = the original stop at open
-fav = bar_high if p.direction == "long" else bar_low
-cand = ladder_stop(p.direction, p.entry, p.entry_stop, fav)
-if cand is not None and _is_tighter_stop(p.direction, p.stop, cand, mark):
-    p.stop = cand
-    report["profit_locks_ratcheted"] = report.get("profit_locks_ratcheted", 0) + 1
+pos = pos.model_copy(update={"liq_price": liq})           # freshly-opened position
+_orig_stop, _ratchet = pos.stop, None                     # the ORIGINAL stop at open
+fb = last_completed_frame(ctx.frames[unified], now, tf).iloc[-1]   # the FIRING candle
+_ratchet = ratcheted_stop(pos.direction, pos.entry, _orig_stop, _orig_stop,
+                          fb.high, fb.low, fb.close)        # tighten-only via mark=close
+pos = pos.model_copy(update={"entry_stop": _orig_stop,
+                             "stop": _ratchet if _ratchet is not None else _orig_stop})
+if _ratchet is not None:
+    report["profit_locks_ratcheted"] += 1
 ```
+
+The canonical tighten-only rule moves to `profit_lock.is_tighter_stop`; `orchestration._is_tighter_stop`
+delegates to it (DRY — one definition shared by the LLM trail and the ladder).
 
 - **Safety invariant:** the ratchet is applied *only* through the existing
   `_is_tighter_stop(direction, cur_stop, new_stop, mark)` rule (long: `cur_stop < new_stop < mark`;
@@ -110,17 +119,19 @@ sight). `entry_stop` is informational for risk reporting too (the original per-u
 ## Data flow
 
 ```
-gate per-cycle, per open position:
-  fire (if a trigger fired this cycle: open position, stop = original)   [unchanged]
-  -> ladder ratchet (NEW): entry_stop self-heal; candidate = ladder_stop(...);
-     if tighter-and-short-of-mark: position.stop = candidate              [the only new step]
-  -> apply LLM management new_stop (still tighten-only)                   [unchanged]
-  -> detect_exit(position, bar_high, bar_low, ...) gap-honest             [unchanged]
+fire cycle (execute_proposals OPEN loop), per FRESHLY-OPENED position:
+  open_position -> stop = original (= the gated proposal stop, no trail yet)   [unchanged]
+  -> ladder ratchet (NEW): entry_stop = original; candidate = ratcheted_stop(firing candle);
+     if tighter-and-short-of-close: stop = candidate   -> persisted via save_positions
+NEXT cycle (audit_and_reflect), per CARRIED position:
+  detect_exit(position, bar_high, bar_low, ...) uses the PERSISTED (ratcheted) stop  [unchanged]
+  -> a pullback through the profit-lock exits at the lock (a WIN), not the original stop
 ```
 
-On the **fire cycle** the order guarantees `entry_stop` captures the true original before any
-ratchet, and the firing candle's favorable excursion (its high for a long) is used to ratchet
-immediately — exactly the behavior that would have protected the cy97 BTC position.
+The fire-cycle ratchet captures the firing candle's favorable excursion immediately and persists the
+tightened stop, so the very next exit check (even after a missed-cycle outage) stops at the
+profit-lock — exactly the behavior that would have protected the cy97 BTC position (+0.5R win instead
+of −1.12R). Carried positions are the RM's to manage; the ladder does not re-touch them.
 
 ## Error handling / edge cases
 

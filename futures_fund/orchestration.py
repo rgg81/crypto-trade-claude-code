@@ -16,6 +16,7 @@ from futures_fund.cycle import (
 from futures_fund.hitrate import hit_rate
 from futures_fund.memory_layout import ensure_memory_layout
 from futures_fund.portfolio import portfolio_health
+from futures_fund.profit_lock import is_tighter_stop
 from futures_fund.reduce import reduce_position
 from futures_fund.reflect import reflection_payload
 from futures_fund.screen import screen_reports
@@ -626,11 +627,9 @@ def _valid_reduce_fraction(v) -> float | None:
 def _is_tighter_stop(direction: str, cur_stop: float, new_stop: float, mark: float | None) -> bool:
     """A trailed stop is valid only if it is TIGHTER than the current stop and short of the mark —
     a winning long locks profit ABOVE entry, a winning short BELOW; a stop past the mark would
-    insta-stop. Shared by the HOLD trail and the reduce-v2 bank-and-trail."""
-    if mark is None:
-        return False
-    return ((direction == "long" and cur_stop < new_stop < mark) or
-            (direction == "short" and mark < new_stop < cur_stop))
+    insta-stop. Shared by the HOLD trail and the reduce-v2 bank-and-trail. Delegates to the
+    canonical `profit_lock.is_tighter_stop` (#268) so the trail and the ladder share ONE rule."""
+    return is_tighter_stop(direction, cur_stop, new_stop, mark)
 
 
 _NOISE_BAND_ATR = 0.6  # a stop trailed closer than this many ATR to the mark risks a noise wick-out

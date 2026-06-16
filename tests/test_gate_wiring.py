@@ -890,3 +890,31 @@ def test_gate_floor_quadrant_uses_completed_frame_not_forming(tmp_path):
                       proposals=[prop], regime_state=_regime("risk_on"))
     led = [e for e in shadow_ledger(state_dir) if str(e.get("reason", "")).startswith("RR")]
     assert led and led[0]["quadrant"] == "low_vol_range"   # COMPLETED frame, not forming
+
+
+def test_fire_time_profit_lock_ladder_ratchets_a_fired_stop_entry(tmp_path):
+    """#268 regression — a confirmation-gated long stop_entry that FIRES deep in profit (fills at
+    the trigger BELOW the firing candle's close, which ran higher) has its stop ratcheted toward
+    profit AT FIRE-TIME (deterministic, no LLM), with entry_stop recording the ORIGINAL stop. This
+    is the cy97 BTC fix: a freshly-fired winner is protected through the gap to the next management
+    cycle / an outage, instead of round-tripping to its original stop."""
+    state_dir, memory_dir = tmp_path / "s", tmp_path / "m"
+    f = _uptrend()
+    li = f.index[-1]
+    # firing candle: traded DOWN through the 146.5 trigger (low 145) then closed HIGHER at 148 (high
+    # 149) -> a long stop_entry fills AT 146.5 and is already deep in profit (close 148 > 146.5).
+    f.loc[li, "open"], f.loc[li, "high"] = 146.5, 149.0
+    f.loc[li, "low"], f.loc[li, "close"] = 145.0, 148.0
+    ex = FakeExchange({"BTC/USDT:USDT": f})
+    _pf(state_dir, memory_dir, ex)
+    save_pending_orders(state_dir, [PendingOrder(
+        symbol="BTCUSDT", direction="long", kind="stop_entry", trigger_level=146.5,
+        stop=145.0, take_profits=[150.0], atr=1.5, created_cycle=0, expires_cycle=9)])
+    report = gate_execute_step(ex, _settings(), state_dir, memory_dir, now=NOW, cycle_no=1,
+                               proposals=[], regime_state=_regime("risk_on"))
+    assert report["triggers_fired"] == 1 and report["opened"] == 1
+    assert report.get("profit_locks_ratcheted", 0) >= 1
+    pos = load_positions(state_dir)[0]
+    assert abs(pos.entry_stop - 145.0) < 0.01    # the ORIGINAL stop recorded, not the ratcheted one
+    assert pos.stop > pos.entry                  # ratcheted into PROFIT (above the ~146.5 fill)
+    assert pos.stop > pos.entry_stop             # and tighter than the original stop

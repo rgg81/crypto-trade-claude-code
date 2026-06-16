@@ -133,3 +133,16 @@ def test_effective_funding_rate_averages_entry_and_exit_sign_fix():
     assert _effective_funding_rate(-0.001, -0.001) == -0.001   # collecting throughout (short edge)
     assert _effective_funding_rate(0.0008, 0.0012) == 0.001    # paying throughout (long)
     assert _effective_funding_rate(None, 0.0005) == 0.0005     # no entry rate -> legacy fallback
+
+
+def test_fire_time_ladder_records_entry_stop_even_without_ratchet(tmp_path):
+    """A normal open (firing candle NOT deep in profit) still records entry_stop = the original
+    stop and does NOT ratchet — the wiring runs but is a no-op below the first rung."""
+    state_dir, memory_dir = tmp_path / "state", tmp_path / "memory"
+    ex = FakeExchange({"BTC/USDT:USDT": _uptrend()})  # default highs = close + 0.2 (tiny excursion)
+    report = run_cycle(ex, _settings(), state_dir, memory_dir,
+                       now=datetime(2026, 3, 1, tzinfo=UTC), cycle_no=1)
+    assert report["opened"] == 1
+    pos = load_positions(state_dir)[0]
+    assert pos.entry_stop is not None and pos.entry_stop == pos.stop  # set, no ratchet
+    assert report.get("profit_locks_ratcheted", 0) == 0
