@@ -35,18 +35,31 @@ Minimal protected footprint: one edit to `audit_and_reflect`; everything else no
 ### 1. `futures_fund/replay.py` — NEW, non-protected, pure
 
 ```python
-def gap_window(df, last_served_ts, now, timeframe="4h") -> tuple[float, float, float] | None:
-    """The (max_high, min_low, first_open) over the COMPLETED candles strictly after
-    `last_served_ts` and up to `now`'s completed bar — the bars the gate missed during a gap.
-    Returns the SINGLE latest completed bar's (high, low, open) when there is no gap (one new bar),
-    when `last_served_ts` is None/stale (>= the latest completed ts), or when the frame is too short
-    — so the normal cadence is byte-identical to today. None only if there is no completed bar."""
+def gap_window(df, last_served_ts, now, timeframe="4h", direction="long") -> tuple | None:
+    """The (max_high, min_low, gap_open) over the COMPLETED candles with open-ts >= last_served_ts
+    and up to `now`'s completed bar — the bars the gate missed during a gap. `gap_open` is the
+    DIRECTIONALLY-CONSERVATIVE open for a gap-honest stop fill: the MIN open across the window for a
+    long, the MAX for a short (see the conservatism note). Returns the SINGLE latest completed bar's
+    (high, low, open) when there is no gap (one new bar), when `last_served_ts` is None/stale (>= the
+    latest completed ts), or when the frame is too short — byte-identical to today. None only if
+    there is no completed bar."""
 ```
 
 Logic: drop the still-forming bar (reuse `last_completed_frame`); take the rows with open-ts
 **`>= last_served_ts`** (see the off-by-one note below); if none (no gap / stale floor) use just the
-latest completed row; return `(max of high, min of low, open of the EARLIEST row in the window)`.
-Pure, no IO.
+latest completed row; return `(max of high, min of low, directionally-conservative open)`. Pure, no
+IO.
+
+**Why a directional `gap_open`, not the earliest open (the conservatism fix from the adversarial
+review).** `_gap_honest_exit_level` fills a long stop at `min(level, bar_open)` and a short stop at
+`max(level, bar_open)`. If `gap_open` were the EARLIEST missed bar's open, then when a *later* bar is
+the one that gaps through the stop, `min(level, earliest_open)` pins the fill to the unreachable stop
+LEVEL — booking a smaller loss than reality (an **optimistic paper win**, violating the desk's
+pessimistic fill model). The most pessimistic open is the **minimum** across the window for a long
+(the bar that gapped down furthest) and the **maximum** for a short. This is also exactly honest:
+any open below a long's stop belongs to a bar that genuinely gapped through it, so `min(level,
+min_open)` is the true worst-case fill, never an over-penalty. On the no-gap path the window is one
+bar whose single open is direction-invariant, so identity holds. The caller passes `p.direction`.
 
 **Why `>=`, not `>` (the off-by-one this feature exists to kill).** A cycle that ran at instant
 `T` evaluated the bar with open-ts `floor4(T) - 4h`: `last_completed_frame` drops the then-forming
@@ -112,32 +125,47 @@ halt check), NOT `gate_execute_step` (the spec's first sketch named the wrong fu
   idempotently (a position already closed by a prior partial run is gone from `positions.json`, so no
   double-close).
 - Pessimistic and conservative: the window's `min_low`/`max_high` with liq>stop>tp can only record an
-  exit at/worse-than a single-bar check; never an optimistic win. Funding is unchanged (already
-  accrues over the whole hold via `count_funding_events(opened_ts, now)`).
+  exit at/worse-than a single-bar check; never an optimistic win. The gap-honest FILL is likewise
+  pessimistic — `gap_open` is the directionally-worst window open (min long / max short), so a stop
+  gapped by a LATER missed bar fills at that worse open, not the unreachable stop level (the
+  adversarial-review fix). Funding is unchanged (accrues over the whole hold via
+  `count_funding_events(opened_ts, now)`).
 - A position opened THIS cycle is opened in `execute_proposals` AFTER `audit_and_reflect`, so it is
   never gap-replayed on its open cycle (correct — it had no prior served candle to gap from).
 
 ## Testing
 
 - **`tests/test_replay.py`** (pure): no-gap → single bar; a 2- and 3-bar gap → correct
-  `max_high`/`min_low`/`first_open`; **the off-by-one pin — a 1-candle gap includes BOTH the
+  `max_high`/`min_low`; **the directional gap-open pin — a long takes the MIN window open, a short
+  the MAX, even when a LATER bar (not the earliest) is the one that gapped** (the conservatism fix);
+  **the off-by-one pin — a 1-candle gap includes BOTH the
   bar that opened AT `last_served_ts` (forming during the prior run) AND the latest bar** (`>=`, not
-  `>`); `first_open` is the EARLIEST window bar's open; `last_served_ts` None/stale → latest bar;
-  forming-bar dropped; short/empty frame safe.
+  `>`); `last_served_ts` None/stale → latest bar; forming-bar dropped; short/empty frame safe.
 - **`tests/test_scheduling.py`** (`last_served_candle`): cold start → None; returns the highest
   parsing report's served candle; skips a current dir with no/garbled report (idempotent RETRY).
 - **Regression** (gate/cycle): a long whose stop sits between the latest bar's low and a *missed*
   bar's low — i.e. the missed bar dipped through the stop but price recovered so the latest bar's low
   is above it — now **exits at the stop** (asserting it does NOT stay open). The counterfactual
-  (single-bar today) leaves it open. Plus a no-gap test asserting unchanged behavior.
+  (single-bar today) leaves it open. Plus a no-gap test and a cold-start test asserting unchanged
+  behavior, and a **fill-price** test: a missed bar that GAPS OPEN below the stop exits at the gapped
+  open (realized loss reflects the gap, not the stop level), pinning the directional `gap_open` fix.
 - Full `uv run pytest` green; zero net-new ruff on touched files; existing exit/cycle/orchestration
   tests unaffected (no-gap path is identical).
 
 ## Non-goals / invariants
 
-- No change to `exits`, `executor`, `risk_gate`, `liquidation`, `sizing`, `consolidation`, fill realism.
+- No change to `exits`, `executor`, `risk_gate`, `liquidation`, `sizing`, `consolidation`. Fill
+  realism is unchanged in MECHANISM (`_gap_honest_exit_level`); the only change is feeding it the
+  window's directionally-worst open instead of a single bar's — strictly more pessimistic.
 - The replay can only ADD a missed exit, never suppress/relax one — it strengthens fidelity.
 - Conservative (pessimistic) by construction; no optimistic paper wins.
+- **Known pre-existing limitation (NOT introduced here, NOT fixed here):** the gap floor is the
+  prior cycle's *served candle* `S = floor4(gate-execute instant)`, but the audit runs at the
+  earlier *preflight* instant. If a prior cycle's funnel straddled a 4h boundary (preflight in candle
+  `C`, gate stamped `S = C+4h`), the floor `>= S` can skip bar `C`. The OLD single-bar code missed
+  that same bar identically, so the feature remains a strict superset; hardening would derive the
+  floor from the preflight audit instant (touches the protected scheduling cadence primitive) —
+  deferred.
 
 ## Rollout
 

@@ -147,8 +147,13 @@ def preflight_step(exchange, settings: Settings, state_dir, memory_dir,
     report = {"cycle": cycle_no, "halted": False, "opened": 0, "closed": 0,
               "carried": 0, "stuck_close": 0, "equity": account.balance, "actions": []}
     ctx = fetch_context(exchange, settings)
+    # Missed-candle replay: the prior cycle's served candle is the gap floor. After a loop outage
+    # the exit audit then honors a stop/TP/liq touched during a candle the gate MISSED, not just the
+    # latest bar. None (cold start) -> single latest bar = today's behavior. (futures_fund.replay)
+    from futures_fund.scheduling import last_served_candle
+    last_served_ts = last_served_candle(state_dir, now)
     positions = audit_and_reflect(ctx, positions, account, memory_dir, now, report,
-                                  agent_key=_AGENT_KEY)
+                                  agent_key=_AGENT_KEY, last_served_ts=last_served_ts)
     save_account(state_dir, account)
     save_positions(state_dir, positions)
     # Soft dollar-neutral exposure read (market-neutral mandate): gross long $ vs short $ + net tilt,

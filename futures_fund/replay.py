@@ -5,9 +5,10 @@ does not run for several boundaries; on resume it would otherwise serve only the
 silently discard the intermediate MISSED candles, so a stop/TP/liq that price touched during a
 missed candle goes unhonored when price recovered by the latest bar. `gap_window` collapses every
 completed candle since the last-served candle into a single conservative (max_high, min_low,
-first_open) window; the EXISTING `detect_exit` + pessimistic priority (liq > stop > tp) then fill it
+gap_open) window; the EXISTING `detect_exit` + pessimistic priority (liq > stop > tp) then fill it
 exactly as today. The change can only WIDEN the [low, high] checked — it can surface a missed exit,
-never suppress one. Pure, no IO.
+never suppress one — and the gap-honest fill stays PESSIMISTIC: gap_open is the directionally-worst
+open in the window (min for a long, max for a short), never the earliest. Pure, no IO.
 
 Off-by-one (the crux): a cycle that ran at instant `T` evaluated the bar with open-ts `floor4(T)-4h`
 — `last_completed_frame` drops the then-forming served-candle bar (open-ts `floor4(T)`). The served
@@ -18,11 +19,9 @@ latest bar (`S` one step back selects exactly the one new completed bar) — byt
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from futures_fund.brief import last_completed_frame
-
-UTC = timezone.utc
 
 
 def _aware_utc(ts) -> datetime | None:
@@ -37,9 +36,19 @@ def _aware_utc(ts) -> datetime | None:
         return None
 
 
-def gap_window(df, last_served_ts: datetime | None, now: datetime | None, timeframe: str = "4h"):
-    """The (max_high, min_low, first_open) over the COMPLETED candles the gate missed during a gap —
+def gap_window(df, last_served_ts: datetime | None, now: datetime | None,
+               timeframe: str = "4h", direction: str = "long"):
+    """The (max_high, min_low, gap_open) over the COMPLETED candles the gate missed during a gap —
     those with open-ts `>= last_served_ts`, up to the latest completed bar.
+
+    `gap_open` is the DIRECTIONALLY-CONSERVATIVE open for a gap-honest stop fill, NOT the earliest
+    bar's open. A long stop fills at `min(level, open)`, so the most pessimistic open is the MINIMUM
+    across the window — the bar that gapped DOWN furthest through the stop, which may be a LATER bar
+    than the earliest missed one; a short stop fills at `max(level, open)`, so it is the MAXIMUM.
+    Returning the earliest open would pin the fill to the unreachable stop LEVEL when a later bar is
+    the one that gapped — booking a smaller loss than reality (an optimistic paper win). Any open
+    below a long's stop belongs to a bar that genuinely gapped through it, so the min-open is the
+    honest worst-case fill, never an over-penalty.
 
     Returns the SINGLE latest completed bar's (high, low, open) when there is no gap (one new bar),
     when `last_served_ts` is None (cold start) or stale (>= the latest completed open-ts, e.g. clock
@@ -62,5 +71,6 @@ def gap_window(df, last_served_ts: datetime | None, now: datetime | None, timefr
         return latest_tuple  # stale / future floor -> latest single bar (fail-safe)
     highs = [float(cdf["high"].iloc[i]) for i in rows]
     lows = [float(cdf["low"].iloc[i]) for i in rows]
-    first_open = float(cdf["open"].iloc[rows[0]])  # earliest missed bar's open (gap-open for fills)
-    return (max(highs), min(lows), first_open)
+    opens = [float(cdf["open"].iloc[i]) for i in rows]
+    gap_open = min(opens) if direction == "long" else max(opens)  # most pessimistic gap-honest fill
+    return (max(highs), min(lows), gap_open)

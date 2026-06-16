@@ -23,6 +23,7 @@ from futures_fund.models import TradeProposal
 from futures_fund.policy import caps_for, circuit_breaker
 from futures_fund.portfolio import portfolio_health
 from futures_fund.profit_lock import ratcheted_stop
+from futures_fund.replay import gap_window
 from futures_fund.risk_gate import GateInputs, evaluate
 from futures_fund.rr_floor import effective_rr_floor, load_rr_floor
 from futures_fund.state import (
@@ -100,8 +101,13 @@ def _entry_funding_rate(memory_dir, decision_id):
 
 def audit_and_reflect(ctx: CycleContext, positions: list[Position], account: AccountState,
                       memory_dir, now: datetime, report: dict,
-                      agent_key: str = _BASELINE) -> list[Position]:
-    """Phase 1: close positions whose latest bar hit stop/tp/liq; patch outcomes + hit-rate."""
+                      agent_key: str = _BASELINE,
+                      last_served_ts: datetime | None = None) -> list[Position]:
+    """Phase 1: close positions whose missed-candle gap window hit stop/tp/liq; patch outcomes +
+    hit-rate. `last_served_ts` (the prior cycle's served candle) is the floor of the gap window: the
+    exit check considers every COMPLETED candle since it, not just the latest, so a stop/TP/liq
+    touched during a candle the gate MISSED in an outage is honored. None (the default / cold start)
+    -> single latest bar = today's behavior."""
     still_open: list[Position] = []
     for p in positions:
         sym = ctx.raw_to_unified.get(p.symbol)
@@ -109,20 +115,29 @@ def audit_and_reflect(ctx: CycleContext, positions: list[Position], account: Acc
             still_open.append(p)
             report["carried"] += 1
             continue
-        # Exits read the latest COMPLETED candle (mirrors the trigger path's last_completed_frame —
-        # cy77 fix). The OHLCV feed's iloc[-1] is the still-FORMING candle, snapshotted near its
-        # open; a stop/TP wick landing later in a candle would fall into the completed iloc[-2] row
-        # next cycle and never be checked, dodging a fill a live resting order would have taken.
-        cdf = last_completed_frame(ctx.frames[sym], now, ctx.settings.timeframe)
-        bar = cdf.iloc[-1]
+        # Exits read every COMPLETED candle since the LAST-SERVED candle, collapsed into one
+        # conservative (max_high, min_low, first_open) gap window (futures_fund.replay). On the
+        # normal +4h cadence this IS the single latest completed bar — byte-identical to the cy77
+        # single-bar fix (the OHLCV feed's iloc[-1] is the still-FORMING candle, dropped inside
+        # gap_window). After a loop outage it ALSO honors a stop/TP/liq touched during a MISSED
+        # candle that price then recovered from — which a single-bar check silently dropped. The
+        # window can only WIDEN [low, high]; it surfaces a missed exit, never suppresses one. The
+        # gap-honest fill stays pessimistic: gap_open is the directionally-worst open (min for a
+        # long, max for a short), so a stop gapped by a LATER missed bar fills at that worse open.
+        win = gap_window(ctx.frames[sym], last_served_ts, now, ctx.settings.timeframe,
+                         direction=p.direction)
+        if win is None:
+            still_open.append(p)
+            continue
+        g_high, g_low, g_open = win
         fr = ctx.fundings[sym]
         n_events = count_funding_events(p.opened_ts, now, int(fr.interval_hours))
         # Accrue funding at the AVERAGE of the entry and exit rates over the hold, not the exit rate
         # alone — the cy78 sign-inversion fix (see _effective_funding_rate).
         eff_rate = _effective_funding_rate(_entry_funding_rate(memory_dir, p.decision_id),
                                            fr.current_rate)
-        ct = detect_exit(p, bar_high=float(bar["high"]), bar_low=float(bar["low"]),
-                         bar_open=float(bar["open"]),  # gap-honest stop/liq exit fills
+        ct = detect_exit(p, bar_high=g_high, bar_low=g_low,
+                         bar_open=g_open,  # gap-honest fills (first missed bar's open)
                          funding_rate=eff_rate, funding_events=n_events,
                          slippage_bps=_SLIPPAGE_BPS)
         if ct is None:

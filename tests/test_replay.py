@@ -2,7 +2,7 @@
 
 On resume after a loop outage the exit check must consider EVERY completed candle since the
 last-served candle, not just the latest, so a stop/TP/liq touched during a missed candle is honored.
-`gap_window` returns the (max_high, min_low, first_open) over the missed bars; the existing
+`gap_window` returns the (max_high, min_low, gap_open) over the missed bars; the existing
 detect_exit + pessimistic priority then fill it conservatively. The crux is the off-by-one: the bar
 opening AT the prior served candle was still FORMING during the prior run and was never evaluated,
 so the window floor is `open-ts >= last_served_ts` (`>` would skip that first missed candle).
@@ -58,7 +58,7 @@ def test_one_candle_gap_includes_the_bar_that_opened_at_the_served_candle():
     # THE OFF-BY-ONE PIN. prior served candle = t2; an outage skipped t3's candle. The bar that
     # opened AT t2 was forming during the prior run -> never evaluated -> MUST be in the window.
     win = gap_window(_frame5(), T0 + 2 * H4, NOW)
-    # window = {t2, t3}: max_high from t2 (200), min_low from t2 (50), first_open from t2.
+    # window = {t2, t3}: max_high from t2 (200), min_low from t2 (50), gap_open = t2's open (100).
     assert win == (200.0, 50.0, 100.0)
     # '>' (the buggy floor) would yield only {t3} -> (110, 90, ...), missing t2's 50 low.
 
@@ -66,25 +66,41 @@ def test_one_candle_gap_includes_the_bar_that_opened_at_the_served_candle():
 def test_three_bar_gap_aggregates_all_missed_bars():
     f = _frame([
         (10.0, 11.0, 9.0),    # t0
-        (20.0, 25.0, 18.0),   # t1  <- earliest in window -> first_open = 20
+        (20.0, 25.0, 18.0),   # t1  <- earliest in window; opens are uniform so gap_open = 20
         (20.0, 30.0, 12.0),   # t2  <- min_low here (12)
         (20.0, 40.0, 19.0),   # t3  <- max_high here (40), latest COMPLETED
         (20.0, 99.0, 0.5),    # t4  <- FORMING (dropped)
     ])
-    win = gap_window(f, T0 + 1 * H4, NOW)  # window = {t1, t2, t3}
+    win = gap_window(f, T0 + 1 * H4, NOW, direction="long")  # window = {t1, t2, t3}
     assert win == (40.0, 12.0, 20.0)
 
 
-def test_first_open_is_the_earliest_window_bar_open():
+def test_long_gap_open_is_the_lowest_window_open_not_the_earliest():
+    # CONSERVATISM: a long stop fills at min(level, open), so the gap-open MUST be the LOWEST open
+    # in the window — the bar that gapped DOWN furthest through the stop — even when that bar is
+    # LATER than the earliest missed bar. The earliest open (100 here) would be OPTIMISTIC.
     f = _frame([
-        (1.0, 2.0, 0.5),      # t0
-        (7.0, 8.0, 6.0),      # t1  <- earliest in window -> first_open MUST be 7, not t3's open
-        (50.0, 60.0, 40.0),   # t2
-        (50.0, 55.0, 45.0),   # t3  latest completed
-        (50.0, 70.0, 30.0),   # t4  forming (dropped)
+        (10.0, 11.0, 9.0),       # t0
+        (100.0, 101.0, 96.0),    # t1  earliest in window, open 100 (sits ABOVE a ~95 stop)
+        (90.0, 99.0, 85.0),      # t2  LATER bar gaps DOWN, open 90 (BELOW the stop) -> honest fill
+        (110.0, 112.0, 108.0),   # t3  latest completed, open 110
+        (110.0, 999.0, 1.0),     # t4  forming (dropped)
     ])
-    _, _, first_open = gap_window(f, T0 + 1 * H4, NOW)
-    assert first_open == 7.0
+    _, _, gap_open = gap_window(f, T0 + 1 * H4, NOW, direction="long")
+    assert gap_open == 90.0      # min open; the earliest-open (100) would be optimistically high
+
+
+def test_short_gap_open_is_the_highest_window_open_not_the_earliest():
+    # Mirror: a short stop fills at max(level, open) -> the gap-open is the HIGHEST window open.
+    f = _frame([
+        (10.0, 11.0, 9.0),       # t0
+        (100.0, 104.0, 99.0),    # t1  earliest, open 100 (sits BELOW a ~105 stop)
+        (110.0, 120.0, 109.0),   # t2  LATER bar gaps UP, open 110 (ABOVE the stop) -> honest fill
+        (90.0, 92.0, 88.0),      # t3  latest completed, open 90
+        (90.0, 999.0, 1.0),      # t4  forming (dropped)
+    ])
+    _, _, gap_open = gap_window(f, T0 + 1 * H4, NOW, direction="short")
+    assert gap_open == 110.0     # max open; the earliest-open (100) would be optimistically low
 
 
 def test_none_floor_returns_latest_single_bar():

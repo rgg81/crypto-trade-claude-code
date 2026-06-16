@@ -918,3 +918,126 @@ def test_fire_time_profit_lock_ladder_ratchets_a_fired_stop_entry(tmp_path):
     assert abs(pos.entry_stop - 145.0) < 0.01    # the ORIGINAL stop recorded, not the ratcheted one
     assert pos.stop > pos.entry                  # ratcheted into PROFIT (above the ~146.5 fill)
     assert pos.stop > pos.entry_stop             # and tighter than the original stop
+
+
+# --------------------------------------------------- missed-candle replay (aggregate-window exits)
+
+def _replay_frame(now, n=60):
+    """A 4h frame ending at the FORMING bar (open-ts == floor4(now)); mild uptrend so indicators are
+    well-defined. The two trailing completed bars' lows are overridden by `_staged_replay` below."""
+    import numpy as np
+    import pandas as pd
+
+    from futures_fund.scheduling import floor4
+    rng = np.random.default_rng(7)
+    close = 100.0 + 0.2 * np.arange(n) + rng.normal(0, 0.05, n)
+    idx = pd.date_range(end=floor4(now), periods=n, freq="4h", tz="UTC")
+    return pd.DataFrame({"timestamp": idx, "open": close, "high": close + 0.2,
+                         "low": close - 0.2, "close": close, "volume": 1.0})
+
+
+def _staged_replay(now):
+    """Frame where the MISSED bar (16:00, index -3) dipped THROUGH the stop while the latest
+    completed bar (20:00, index -2) recovered ABOVE it. Returns (frame, entry, stop)."""
+    f = _replay_frame(now)
+    entry = float(f["close"].iloc[-2])         # latest COMPLETED bar (20:00) close
+    stop = entry - 5.0
+    f.loc[f.index[-3], "low"] = entry - 8.0    # 16:00 (missed) dipped through the stop
+    f.loc[f.index[-2], "low"] = entry - 2.0    # 20:00 (latest) recovered above the stop
+    return f, entry, stop
+
+
+def _seed_btc_long(state_dir, entry, stop):
+    from futures_fund.state import Position, save_positions
+    save_positions(state_dir, [Position(
+        symbol="BTCUSDT", direction="long", qty=1.0, entry=entry, stop=stop,
+        take_profits=[entry + 1000.0], leverage=3.0, margin=entry / 3.0, liq_price=entry - 500.0,
+        opened_cycle=0, opened_ts=dt.datetime(2026, 2, 20, tzinfo=UTC))])
+
+
+def _write_cycle_report(state_dir, n, candle):
+    import json
+    d = state_dir / "cycle" / str(n)
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "report.json").write_text(json.dumps({"cycle": n, "candle": candle, "actions": []}))
+
+
+def _replay_ex(f):
+    return _UnionExchange({"BTC/USDT:USDT": f}, {"BTCUSDT": "BTC/USDT:USDT"})
+
+
+def test_missed_candle_replay_honors_a_stop_touched_during_the_gap(tmp_path):
+    """Regression: after an outage the gate resumes and would serve only the LATEST candle. A long
+    whose stop was touched during a MISSED candle (price recovered above it by the latest bar) must
+    STILL exit at the stop — the gap window honors every completed candle since the last-served one.
+    Without the floor (the counterfactual tests below) the recovered position wrongly stays open."""
+    state_dir, memory_dir = tmp_path / "s", tmp_path / "m"
+    now = dt.datetime(2026, 3, 1, tzinfo=UTC)
+    f, entry, stop = _staged_replay(now)
+    _seed_btc_long(state_dir, entry, stop)
+    # prior completed cycle served the 12:00 candle; an outage skipped 16:00 and 20:00 -> a gap.
+    _write_cycle_report(state_dir, 1, "2026-02-28T12:00:00+00:00")
+    ctx = preflight_step(_replay_ex(f), _settings(), state_dir, memory_dir, now=now, cycle_no=2,
+                         http_client=_HttpClient())
+    assert ctx["audit"]["closed"] == 1 and load_positions(state_dir) == []  # exited at gapped stop
+
+
+def test_no_gap_single_bar_leaves_a_recovered_position_open(tmp_path):
+    """No-gap identity: when the prior served candle is the immediately-preceding one (normal +4h
+    cadence) the window is the single latest bar — the recovered low is above the stop, so the
+    position stays open exactly as today. Proves the change only ADDS missed exits, never invents.
+    """
+    state_dir, memory_dir = tmp_path / "s", tmp_path / "m"
+    now = dt.datetime(2026, 3, 1, tzinfo=UTC)
+    f, entry, stop = _staged_replay(now)
+    _seed_btc_long(state_dir, entry, stop)
+    _write_cycle_report(state_dir, 1, "2026-02-28T20:00:00+00:00")  # prior served the latest candle
+    ctx = preflight_step(_replay_ex(f), _settings(), state_dir, memory_dir, now=now, cycle_no=2,
+                         http_client=_HttpClient())
+    assert ctx["audit"]["closed"] == 0 and len(load_positions(state_dir)) == 1
+
+
+def test_cold_start_no_prior_cycle_uses_single_latest_bar(tmp_path):
+    """No prior completed cycle -> last_served_candle is None -> single latest bar (today's
+    behavior); the recovered low is above the stop, so the position is held, not closed."""
+    state_dir, memory_dir = tmp_path / "s", tmp_path / "m"
+    now = dt.datetime(2026, 3, 1, tzinfo=UTC)
+    f, entry, stop = _staged_replay(now)
+    _seed_btc_long(state_dir, entry, stop)
+    ctx = preflight_step(_replay_ex(f), _settings(), state_dir, memory_dir, now=now, cycle_no=1,
+                         http_client=_HttpClient())
+    assert ctx["audit"]["closed"] == 0 and len(load_positions(state_dir)) == 1
+
+
+def _staged_gap_fill(now):
+    """The MISSED bar (16:00, index -3) GAPS OPEN below the stop while the EARLIEST window bar
+    (12:00, index -4) opens ABOVE it — so the honest fill is the gapped LATER open, not the stop
+    level (the optimism the earlier first_open produced). Returns (frame, entry, stop)."""
+    f = _replay_frame(now)
+    entry = float(f["close"].iloc[-2])              # latest COMPLETED bar (20:00) close
+    stop = entry - 5.0
+    f.loc[f.index[-3], "open"] = entry - 20.0       # 16:00 GAPS DOWN, opens far below the stop
+    f.loc[f.index[-3], "high"] = entry - 19.8
+    f.loc[f.index[-3], "low"] = entry - 22.0
+    f.loc[f.index[-2], "low"] = entry - 2.0         # 20:00 recovered above the stop
+    return f, entry, stop
+
+
+def test_missed_candle_replay_fills_a_gapped_stop_at_the_honest_open(tmp_path):
+    """Conservatism (adversarial-review fix): when a MISSED bar GAPS OPEN below a long's stop, the
+    exit fills at that gapped open — the WORSE of (stop, open) — not the unreachable stop level. The
+    gapped bar (16:00) is LATER than the earliest missed bar (12:00), so this pins the directional
+    min-open fix: the realized loss reflects the ~$20/unit gap, not the ~$5/unit stop."""
+    from futures_fund.state import load_account
+    state_dir, memory_dir = tmp_path / "s", tmp_path / "m"
+    now = dt.datetime(2026, 3, 1, tzinfo=UTC)
+    f, entry, stop = _staged_gap_fill(now)
+    _seed_btc_long(state_dir, entry, stop)
+    _write_cycle_report(state_dir, 1, "2026-02-28T12:00:00+00:00")  # outage skipped 16:00 + 20:00
+    before = load_account(state_dir, 10_000.0).balance
+    ctx = preflight_step(_replay_ex(f), _settings(), state_dir, memory_dir, now=now, cycle_no=2,
+                         http_client=_HttpClient())
+    after = load_account(state_dir, 10_000.0).balance
+    assert ctx["audit"]["closed"] == 1
+    loss = before - after
+    assert loss > 15.0   # decisively the gapped open (~$20), NOT the stop level (~$5, the old bug)
