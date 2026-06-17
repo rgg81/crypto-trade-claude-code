@@ -21,6 +21,10 @@ MIN_RR = 2.0
 _RR_EPS = 1e-6  # float tolerance so an exactly-2R proposal isn't vetoed by rounding
 HARD_MIN_RR = 1.6  # gate-owned ABSOLUTE floor: an adaptive rr_floor never drops a veto below this
 MIN_LIQ_DISTANCE_MULT = 2.5
+# A swing counts as a genuine intervening obstacle (open-air-TP guard) only if it sits more than
+# this many ATR beyond entry. A swing within the margin is effectively AT the entry (price at its
+# high/low -> a de-facto break targeting a measured move), which must NOT be capped.
+_OPEN_AIR_STRUCT_MARGIN_ATR = 0.5
 
 
 class GateInputs(BaseModel):
@@ -34,6 +38,10 @@ class GateInputs(BaseModel):
     monthly_pnl_pct: float = 0.0
     pay_bnb: bool = False
     rr_floor: float | None = None  # regime-adaptive RR floor; None -> MIN_RR. HARD_MIN_RR-wrapped.
+    # Nearest structural resistance/support (brief swing_levels) for the open-air-TP guard. None ->
+    # the guard is dormant (byte-identical to pre-guard behavior).
+    swing_high: float | None = None
+    swing_low: float | None = None
 
 
 def _reward_risk(p: TradeProposal) -> float:
@@ -43,6 +51,34 @@ def _reward_risk(p: TradeProposal) -> float:
     reward = abs(nearest_tp - p.entry)
     risk = p.risk_per_unit
     return reward / risk if risk > 0 else 0.0
+
+
+def _structure_capped_reward_risk(p: TradeProposal, swing_high: float | None,
+                                  swing_low: float | None) -> float | None:
+    """The reward:risk re-measured to the first structural level (swing) that lies STRICTLY BETWEEN
+    the entry and the nearest take-profit — the realistic first target the price must clear.
+    Returns None when no such intervening swing exists, so the caller relies on the raw RR alone:
+    a breakout (entry at/above swing_high) / breakdown (entry at/below swing_low) has the swing
+    BEHIND the entry and legitimately targets a measured move beyond it (SOL cy96); a conservative
+    TP short of the swing has nothing between; and a swing within `_OPEN_AIR_STRUCT_MARGIN_ATR` of
+    entry is the current high/low (a de-facto break, not an obstacle). The guard fires ONLY on the
+    gamed geometry — a now-entry placing its TP PAST a genuine first obstacle into open air to
+    manufacture RR (ZEC/BNB cy100-105). Pure; `capped <= _reward_risk` always (a nearer reward can
+    only shrink), so the caller's veto can only TIGHTEN the floor. None on no TP / risk<=0."""
+    if not p.take_profits:
+        return None
+    risk = p.risk_per_unit
+    if risk <= 0 or not p.atr or p.atr <= 0:
+        return None   # no TP / no risk / no ATR to size the breakout margin -> stay dormant
+    margin = _OPEN_AIR_STRUCT_MARGIN_ATR * p.atr
+    nearest_tp = min(p.take_profits, key=lambda tp: abs(tp - p.entry))
+    if p.direction == "long":
+        if swing_high is None or swing_high >= nearest_tp or swing_high - p.entry <= margin:
+            return None
+        return (swing_high - p.entry) / risk
+    if swing_low is None or swing_low <= nearest_tp or p.entry - swing_low <= margin:
+        return None
+    return (p.entry - swing_low) / risk
 
 
 def _build_sized(p: TradeProposal, spec: SymbolSpec, qty: float, leverage: float) -> SizedTrade:
@@ -81,6 +117,15 @@ def evaluate(inp: GateInputs) -> RiskDecision:
     floor = max(inp.rr_floor if inp.rr_floor is not None else MIN_RR, HARD_MIN_RR)
     if rr < floor - _RR_EPS:
         return RiskDecision(verdict="veto", reason=f"RR {rr:.2f} < min {floor:.2f}")
+    # 2b. Open-air-TP guard: a TP placed PAST the first real structure (a swing between entry+TP)
+    #     can manufacture a passing RR to a vacuum. Re-measure RR to that structure and re-apply the
+    #     same floor. Strengthen-only (capped <= rr); dormant when no swing is between (breakouts,
+    #     conservative TPs, or no swing supplied) -> never weakens the limit, only tightens it.
+    capped_rr = _structure_capped_reward_risk(p, inp.swing_high, inp.swing_low)
+    if capped_rr is not None and capped_rr < floor - _RR_EPS:
+        return RiskDecision(
+            verdict="veto",
+            reason=f"open-air TP: RR-to-structure {capped_rr:.2f} < {floor:.2f} (TP beyond swing)")
 
     # 3. Effective per-trade risk budget (caps × breaker multiplier × optional per-trade reduction)
     # Caution tier (caps already halved) AND the -5% step-down can both apply on the same

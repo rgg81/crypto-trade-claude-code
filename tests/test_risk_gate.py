@@ -189,3 +189,100 @@ def test_gate_default_rr_floor_unchanged_at_2():
     assert evaluate(_inputs(proposal=p)).verdict in ("approve", "resize")
     p17 = _proposal(tps=(108.5,))                  # RR 1.7 -> vetoed at default 2.0
     assert evaluate(_inputs(proposal=p17)).verdict == "veto"
+
+
+# --------------------------------------------------- open-air-TP RR guard (structure-capped RR)
+
+def test_open_air_long_tp_beyond_swing_high_is_vetoed():
+    # ZEC-type fabrication: a NOW-entry long whose only resistance (swingH 108) sits BETWEEN entry
+    # (100) and a phantom TP (130). Raw RR = 30/5 = 6 (passes the floor), but RR to the REAL
+    # resistance is only (108-100)/5 = 1.6 < 2.0 -> the gate must veto on the structure-capped RR.
+    p = _proposal(entry=100.0, stop=95.0, tps=(130.0,))
+    d = evaluate(_inputs(proposal=p, swing_high=108.0))
+    assert d.verdict == "veto"
+    assert "open-air" in d.reason.lower() or "structure" in d.reason.lower()
+
+
+def test_open_air_short_tp_beyond_swing_low_is_vetoed():
+    # Mirror: short entry 100, stop 105 (risk 5), support swingL 92 BETWEEN a phantom TP (70) and
+    # entry. Raw RR = 30/5 = 6; RR to real support = (100-92)/5 = 1.6 < 2.0 -> veto.
+    p = _proposal(direction="short", entry=100.0, stop=105.0, tps=(70.0,))
+    d = evaluate(_inputs(proposal=p, spec=_spec().model_copy(update={"min_notional": 1.0}),
+                         swing_low=92.0))
+    assert d.verdict == "veto"
+    assert "open-air" in d.reason.lower() or "structure" in d.reason.lower()
+
+
+def test_breakout_long_entry_above_swing_high_is_not_capped():
+    # A breakout enters AT/above the broken swing_high (99 < entry 100), legitimately targeting a
+    # measured move beyond it (TP 115). No swing sits BETWEEN entry and TP -> no cap -> raw RR 3 ok.
+    p = _proposal(entry=100.0, stop=95.0, tps=(115.0,))
+    d = evaluate(_inputs(proposal=p, swing_high=99.0))
+    assert d.verdict in ("approve", "resize")
+
+
+def test_breakdown_short_entry_below_swing_low_is_not_capped():
+    # Mirror breakdown: short enters AT/below the broken swing_low (101 > entry 100), TP 85 beyond.
+    # swing_low is not strictly between TP and entry -> no cap -> raw RR 3 passes.
+    p = _proposal(direction="short", entry=100.0, stop=105.0, tps=(85.0,))
+    d = evaluate(_inputs(proposal=p, spec=_spec().model_copy(update={"min_notional": 1.0}),
+                         swing_low=101.0))
+    assert d.verdict in ("approve", "resize")
+
+
+def test_tp_short_of_swing_uses_raw_rr():
+    # Conservative TP (110) BELOW the swing_high (120): the swing is not between entry and TP, so no
+    # cap applies and the raw RR (2.0) stands -> passes.
+    p = _proposal(entry=100.0, stop=95.0, tps=(110.0,))
+    d = evaluate(_inputs(proposal=p, swing_high=120.0))
+    assert d.verdict in ("approve", "resize")
+
+
+def test_none_swings_are_byte_identical_no_guard():
+    # The exact ZEC-type proposal that the guard vetoes, with swings unsupplied (None) -> dormant ->
+    # raw RR 6 passes. Proves the guard is the ONLY behavioral change vs today.
+    p = _proposal(entry=100.0, stop=95.0, tps=(130.0,))
+    assert evaluate(_inputs(proposal=p)).verdict in ("approve", "resize")
+
+
+def test_now_entry_capped_rr_clears_floor_is_not_vetoed():
+    # No false-veto: swingH 111 sits between entry (100) and TP (130), but the capped RR
+    # (11/5 = 2.2) still clears the 2.0 floor -> the guard must NOT veto.
+    p = _proposal(entry=100.0, stop=95.0, tps=(130.0,))
+    d = evaluate(_inputs(proposal=p, swing_high=111.0))
+    assert d.verdict in ("approve", "resize")
+
+
+def test_swing_within_atr_margin_is_a_breakout_not_capped():
+    # A market long at the current high: swingH 100.5 is only 0.25 ATR (ATR=2.0) above entry 100 ->
+    # de-facto breakout, NOT an intervening obstacle -> no cap -> raw RR 6 passes. (This is the
+    # market-entry-at-the-recent-high case that must not be spuriously vetoed.)
+    p = _proposal(entry=100.0, stop=95.0, tps=(130.0,))   # atr defaults to 2.0
+    d = evaluate(_inputs(proposal=p, swing_high=100.5))
+    assert d.verdict in ("approve", "resize")
+
+
+def test_zero_atr_proposal_keeps_guard_dormant_no_false_veto():
+    # Degraded feed: a market proposal with atr=0 cannot size the de-facto-breakout margin, so the
+    # guard stays dormant (falls back to the raw-RR floor) rather than risk a false veto on a swing
+    # a hair above entry. Phantom TP 130 with swingH 100.01 -> raw RR 6 passes, NOT vetoed.
+    p = _proposal(entry=100.0, stop=95.0, tps=(130.0,)).model_copy(update={"atr": 0.0})
+    d = evaluate(_inputs(proposal=p, swing_high=100.01))
+    assert d.verdict in ("approve", "resize")
+    import futures_fund.risk_gate as rg
+    assert rg._structure_capped_reward_risk(p, 108.0, None) is None   # atr=0 -> dormant (None)
+
+
+def test_structure_capped_rr_helper_strengthen_only_and_none_cases():
+    import futures_fund.risk_gate as rg
+    # cap fires (swing between) and is <= the raw RR (strengthen-only)
+    p = _proposal(entry=100.0, stop=95.0, tps=(130.0,))
+    capped = rg._structure_capped_reward_risk(p, swing_high=108.0, swing_low=None)
+    assert capped == pytest.approx(1.6) and capped <= rg._reward_risk(p)
+    # no swing supplied -> None (dormant)
+    assert rg._structure_capped_reward_risk(p, swing_high=None, swing_low=None) is None
+    # breakout (entry above swing) -> None
+    assert rg._structure_capped_reward_risk(p, swing_high=99.0, swing_low=None) is None
+    # short mirror caps to swing_low
+    ps = _proposal(direction="short", entry=100.0, stop=105.0, tps=(70.0,))
+    assert rg._structure_capped_reward_risk(ps, None, 92.0) == pytest.approx(1.6)

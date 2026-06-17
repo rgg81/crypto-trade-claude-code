@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
-from futures_fund.baseline import propose, simple_regime
+from futures_fund.baseline import propose, simple_regime, swing_levels
 from futures_fund.brief import last_completed_frame
 from futures_fund.config import Settings
 from futures_fund.consolidation import (
@@ -255,10 +255,17 @@ def execute_proposals(  # noqa: PLR0912
         floor_quadrant = (simple_regime(_cdf).quadrant
                           if _cdf is not None and len(_cdf) else regime.quadrant)
         rr_floor = effective_rr_floor(floor_quadrant, floor_state)
+        # Structural S/R for the open-air-TP guard, computed from the bars BEFORE the latest
+        # completed (firing) bar: a breakout/trigger-fill PRINTS its own new extreme on the firing
+        # bar, so including it would mistake that just-made high/low for a forward obstacle and veto
+        # a legitimate break. Prior structure is the resistance/support the trade actually faces.
+        _sh, _sl = (swing_levels(_cdf.iloc[:-1]) if _cdf is not None and len(_cdf) > 1
+                    else (None, None))
         decision = evaluate(GateInputs(proposal=prop, spec=spec, regime=regime,
                                        health=health, open_positions=open_dicts,
                                        daily_pnl_pct=daily_pnl, weekly_pnl_pct=weekly_pnl,
-                                       monthly_pnl_pct=monthly_pnl, rr_floor=rr_floor))
+                                       monthly_pnl_pct=monthly_pnl, rr_floor=rr_floor,
+                                       swing_high=_sh, swing_low=_sl))
         if decision.verdict in ("approve", "resize") and decision.sized_trade is not None:
             approved.append(decision.sized_trade)
         else:
