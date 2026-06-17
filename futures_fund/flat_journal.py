@@ -22,14 +22,14 @@ def coerce_flat_verdicts(data) -> list[dict]:
     """Normalize the orchestrator's flat_verdicts.json payload to a list of verdict dicts.
 
     The documented contract is a BARE LIST, but the orchestrator can easily mis-wrap it as
-    {"flat_verdicts": [...]} (or {"verdicts": [...]}) — which previously crashed the journal
-    stage with a 'str object is not a mapping' error (iterating dict keys). Tolerate both shapes,
+    {"flat_verdicts": [...]}, {"verdicts": [...]}, or {"flats": [...]} — which previously dropped
+    the verdicts silently (or crashed the stage iterating dict keys). Tolerate all those shapes,
     and fail SAFE (empty list) on anything un-coercible, so a single mis-shape never aborts a
     cycle's why-flat accountability. Mirrors the self-healing normalize_reports contract."""
     if isinstance(data, list):
         return [v for v in data if isinstance(v, dict)]
     if isinstance(data, dict):
-        for key in ("flat_verdicts", "verdicts"):
+        for key in ("flat_verdicts", "verdicts", "flats"):
             inner = data.get(key)
             if isinstance(inner, list):
                 return [v for v in inner if isinstance(v, dict)]

@@ -21,6 +21,8 @@ def test_coerce_flat_verdicts_unwraps_wrapper_dict():
     # the orchestrator mis-wrapping the file as {"flat_verdicts": [...]} must not crash the stage
     assert coerce_flat_verdicts({"flat_verdicts": rows}) == rows
     assert coerce_flat_verdicts({"verdicts": rows}) == rows
+    # "flats" is the other natural mis-wrap (cy107: it silently dropped 3 edge-aligned flats)
+    assert coerce_flat_verdicts({"flats": rows}) == rows
 
 
 def test_coerce_flat_verdicts_empty_and_garbage_are_safe():
