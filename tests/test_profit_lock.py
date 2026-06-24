@@ -144,15 +144,36 @@ def test_ratcheted_stop_none_when_not_tighter():
     assert new is None  # +1R rung -> breakeven (entry) < cur -> not tighter
 
 
-def test_ratcheted_stop_rejects_when_close_below_candidate():
-    # high spiked to +2R (rung -> +1R stop) but the candle CLOSED below that lock -> not short of
-    # mark -> rejected (no optimistic lock above the close)
+def test_ratcheted_stop_no_ratchet_when_only_the_wick_was_in_profit():
+    # high spiked to +2R but the candle CLOSED at only +0.4R -> CLOSE-anchored: the +0.4R close
+    # unlocks NO rung (< the +1R first rung), so no ratchet (the wick is irrelevant). This is the
+    # same close-confirmation that fixes the cy118 wick-whipsaw, here on the long side.
     new = ratcheted_stop("long", ENTRY, ESTOP, ESTOP,
                          bar_high=ENTRY + 2.0 * R, bar_low=ENTRY, bar_close=ENTRY + 0.4 * R)
-    assert new is None  # candidate +1R (entry+R) is NOT < close (entry+0.4R) -> rejected
+    assert new is None
 
 
 def test_ratcheted_stop_short_mirror():
-    # short entry 100 / original stop 110 (R 10); bar low 84 (+1.6R), close 86 -> +1.5R rung -> 95
-    new = ratcheted_stop("short", 100.0, 110.0, 110.0, bar_high=101.0, bar_low=84.0, bar_close=86.0)
+    # CLOSE-anchored: short entry 100 / original stop 110 (R 10); the rung unlocks off the CLOSE, so
+    # a close at 84 (+1.6R) reaches the +1.5R rung -> stop +0.5R = 95 (the wick 83 is irrelevant).
+    new = ratcheted_stop("short", 100.0, 110.0, 110.0, bar_high=101.0, bar_low=83.0, bar_close=84.0)
     assert new == 95.0
+
+
+def test_ratcheted_stop_close_anchored_no_wick_whipsaw():
+    # cy118 AVAX regression (lesson 353d14ad): the rung unlocks off the SUSTAINED close-excursion,
+    # NOT the wick. A short whose firing candle WICKS to +1.1R (bar_low 89) but CLOSES at only +0.3R
+    # (bar_close 97) must NOT ratchet: the +1.0R breakeven rung is reached only by the wick, not by
+    # the close, so anchoring on the close returns None (no premature breakeven for the next bar's
+    # noise to whipsaw). The wick-anchored bug would have locked breakeven (100) here.
+    new = ratcheted_stop("short", 100.0, 110.0, 110.0, bar_high=101.0, bar_low=89.0, bar_close=97.0)
+    assert new is None
+    # mirror for a long: wicks to +1.1R (high 111) but closes +0.3R (close 103) -> no ratchet
+    new_long = ratcheted_stop("long", 100.0, 90.0, 90.0,
+                              bar_high=111.0, bar_low=99.0, bar_close=103.0)
+    assert new_long is None
+    # a GENUINE close-in-profit still ratchets: close 90 = +1.0R -> breakeven rung (sustained profit
+    # IS protected, only the wick-only false signal is suppressed).
+    confirmed = ratcheted_stop("short", 100.0, 110.0, 110.0,
+                               bar_high=101.0, bar_low=88.0, bar_close=90.0)
+    assert confirmed == 100.0

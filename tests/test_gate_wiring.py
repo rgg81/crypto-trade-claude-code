@@ -901,10 +901,11 @@ def test_fire_time_profit_lock_ladder_ratchets_a_fired_stop_entry(tmp_path):
     state_dir, memory_dir = tmp_path / "s", tmp_path / "m"
     f = _uptrend()
     li = f.index[-1]
-    # firing candle: traded DOWN through the 146.5 trigger (low 145) then closed HIGHER at 148 (high
-    # 149) -> a long stop_entry fills AT 146.5 and is already deep in profit (close 148 > 146.5).
-    f.loc[li, "open"], f.loc[li, "high"] = 146.5, 149.0
-    f.loc[li, "low"], f.loc[li, "close"] = 145.0, 148.0
+    # firing candle: traded DOWN through the 146.5 trigger (low 145) then CLOSED deep in profit at
+    # 149.0 (high 149.5) -> a long stop_entry fills ~146.5 (R~1.5) and the SUSTAINED close-excursion
+    # is ~+1.6R, which unlocks the +1.5R rung (close-anchored, not the wick) -> stop ratchets +0.5R.
+    f.loc[li, "open"], f.loc[li, "high"] = 146.5, 149.5
+    f.loc[li, "low"], f.loc[li, "close"] = 145.0, 149.0
     ex = FakeExchange({"BTC/USDT:USDT": f})
     _pf(state_dir, memory_dir, ex)
     save_pending_orders(state_dir, [PendingOrder(

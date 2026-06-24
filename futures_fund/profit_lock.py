@@ -50,9 +50,10 @@ def ladder_stop(
 ) -> float | None:
     """The highest profit-lock stop the favorable excursion has UNLOCKED, or None.
 
-    `favorable_price` is the bar's most-favorable price (high for a long, low for a short). Returns
-    None when no rung is reached, the original risk is degenerate (R_unit <= 0), or the favorable
-    price is non-finite. Up-only by construction (a higher favorable excursion selects an
+    `favorable_price` is the excursion price the caller measures the rung against; the production
+    caller (`ratcheted_stop`) passes the bar CLOSE (the sustained close-excursion), not the wick.
+    Returns None when no rung is reached, the original risk is degenerate (R_unit <= 0), or the
+    favorable price is non-finite. Up-only by construction (a higher favorable excursion selects an
     equal-or-higher rung). The caller applies the result through the tighten-only rule."""
     r_unit = abs(entry - entry_stop)
     if r_unit <= 0.0 or not math.isfinite(favorable_price):
@@ -80,12 +81,25 @@ def ratcheted_stop(
     bar_close: float,
 ) -> float | None:
     """The new (TIGHTER) profit-lock stop for one bar, or None if no ratchet applies — the bar-level
-    combinator the gate calls per open position. Favorable excursion is the bar HIGH (long) / LOW
-    (short); the candidate is accepted ONLY via the tighten-only rule with the bar CLOSE as mark.
-    Using the close as mark keeps the ratchet conservative (it never locks a stop ABOVE the bar's
-    close), and the gate applies it at cycle-end so the exit check always lags the ratchet by one
-    cycle (no intra-candle high-before-low optimism)."""
-    favorable = bar_high if direction == "long" else bar_low
+    combinator the gate calls per open position.
+
+    The rung UNLOCK is anchored to the SUSTAINED close-excursion (the bar CLOSE), NOT the bar's
+    wick (high/low). This is the close-confirmation discipline the desk enforces on trigger
+    ENTRIES, applied to deterministic profit-lock EXITS: a rung ratchets only when the trade has
+    CLOSED that far in profit, never on a single-bar wick that immediately reverts. Rationale: the
+    cy118 AVAX whipsaw (lesson 353d14ad) -- a firing candle wicked to +1.05R but CLOSED at only
+    +0.32R; anchoring the breakeven rung on that wick locked a breakeven stop that the very next
+    bar's normal intra-bar noise tagged, exiting a still-valid (close-basis) thesis FLAT. Anchoring
+    on the close prevents that whipsaw while still protecting genuinely-in-profit closes (a close at
+    +1R still locks breakeven). Symmetric for long and short. `bar_high`/`bar_low` are accepted (the
+    gate passes the full bar) but no longer drive the rung -- the close is the excursion measure.
+
+    The candidate is then accepted ONLY via the tighten-only rule with the bar CLOSE as mark, so it
+    is never looser than `cur_stop` and never past the close (belt-and-suspenders: with a
+    close-anchored rung the candidate's lock_R is always < the close's excursion_R, so it is short
+    of the close by construction). The gate applies the result at cycle-end, so the exit check
+    always lags the ratchet by one cycle (no intra-candle high-before-low optimism)."""
+    favorable = bar_close
     candidate = ladder_stop(direction, entry, entry_stop, favorable)
     if candidate is not None and is_tighter_stop(direction, cur_stop, candidate, bar_close):
         return candidate
