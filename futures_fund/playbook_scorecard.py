@@ -31,7 +31,11 @@ from pathlib import Path
 from futures_fund.journal import read_all_decisions, realized_total
 from futures_fund.vendor.overfit_detector import holm_correction
 
-MIN_N = 8            # decided trades a bucket needs to surface a number (rr_floor precedent)
+MIN_N = 8            # decided trades a SIDE bucket needs to surface a number (rr_floor precedent);
+                     # also the bar for a HARD verdict (WORKING / significance / EDGE callout)
+REGIME_MIN_N = 4     # a per-(side x regime) CELL surfaces as a SOFT "leaning" read at this lower
+                     # floor (the proven short/with-regime edge was n=4, pooled away at MIN_N=8);
+                     # significance + the hard WORKING/EDGE callout still require MIN_N
 DORMANCY_N = 60      # total closed trades below which the whole playbook mostly abstains
 SHRINK_M = 8.0       # Beta-Binomial prior concentration (pseudo-counts toward the pooled base rate)
 Z = 1.959963985      # 95% normal critical value (Wilson + R-CI)
@@ -198,11 +202,14 @@ def _bucket_stats(rs_net: list[float], rs_gross: list[float], wins: int, base_ra
     }
 
 
-def aggregate_playbook(decisions: list[dict], regime_by_cycle: dict, *, min_n: int = MIN_N) -> dict:
+def aggregate_playbook(decisions: list[dict], regime_by_cycle: dict, *, min_n: int = MIN_N,
+                       regime_min_n: int = REGIME_MIN_N) -> dict:
     """Mine the journal into expectancy-led per-bucket stats. Buckets: per SIDE (long/short,
-    regime-pooled) and per (side, regime_alignment) (surfaced only if the cell clears min_n). Pure;
-    fail-safe (skips un-reconstructible / un-classifiable records, counting them). Holm-corrects the
-    p-values across the surfaced-bucket family so multiplicity can't mint a false 'notable'."""
+    regime-pooled, surfaced at min_n) and per (side, regime_alignment) (surfaced at the lower
+    regime_min_n as a SOFT 'leaning' read). Pure; fail-safe (skips un-reconstructible /
+    un-classifiable records, counting them). Holm significance + the hard WORKING verdict still need
+    min_n: the multiplicity family is the >=min_n buckets ONLY, so a thin (<min_n) regime cell can
+    lean favorable/underperforming but can NEVER be minted as a statistically-'significant' edge."""
     closed = [d for d in decisions if d.get("realized_pnl") is not None]
     by_side: dict[str, dict] = {}
     by_side_regime: dict[tuple, dict] = {}
@@ -247,9 +254,11 @@ def aggregate_playbook(decisions: list[dict], regime_by_cycle: dict, *, min_n: i
                     for k, v in by_side.items()}
     regime_buckets = {
         f"{k[0]}/{k[1]}-regime": _bucket_stats(v["net"], v["gross"], v["wins"], base_rate)
-        for k, v in by_side_regime.items() if len(v["net"]) >= min_n}
+        for k, v in by_side_regime.items() if len(v["net"]) >= regime_min_n}
 
-    # Holm multiplicity correction across the live family of SURFACED (>=min_n) buckets only.
+    # Holm multiplicity correction across the live family of >=min_n buckets ONLY — a thin (<min_n)
+    # regime cell is surfaced for visibility but is NOT in the significance family, so it can never
+    # be minted 'significant' / "WORKING" off a small sample.
     surfaced = {k: b for k, b in {**side_buckets, **regime_buckets}.items() if b["n"] >= min_n}
     if surfaced:
         keys = list(surfaced)
@@ -269,6 +278,7 @@ def aggregate_playbook(decisions: list[dict], regime_by_cycle: dict, *, min_n: i
             "regime_coverage": regime_cov,
         },
         "min_n": min_n,
+        "regime_min_n": regime_min_n,
     }
 
 
@@ -305,6 +315,7 @@ def format_playbook_advisory(agg: dict, *, book_flat: bool = False,
     cov = agg.get("coverage", {})
     n_closed = total_closed if total_closed is not None else cov.get("n_closed", 0)
     min_n = agg.get("min_n", MIN_N)
+    regime_min_n = agg.get("regime_min_n", REGIME_MIN_N)
     side = agg.get("side_buckets", {})
     regime = agg.get("regime_buckets", {})
 
@@ -318,12 +329,13 @@ def format_playbook_advisory(agg: dict, *, book_flat: bool = False,
                 f"{min_n} yet) — the playbook ABSTAINS; trade your thesis. It sharpens later.")
 
     lines = [head]
-    # side buckets first (the regime-pooled, honest-today view), then any qualified regime cells
+    # side buckets first (the regime-pooled, honest-today view), then the per-(side x regime) cells
+    # at the lower regime floor (a thin cell prints its stats + a SOFT lean, never "insufficient").
     for nm in ("long", "short"):
         if nm in side:
             lines.append(_bucket_line(f"{nm} book", side[nm], min_n, book_flat=book_flat))
     for nm, b in regime.items():
-        lines.append(_bucket_line(nm, b, min_n, book_flat=book_flat))
+        lines.append(_bucket_line(nm, b, regime_min_n, book_flat=book_flat))
 
     # TWO-SIDED contract (sign keyed off the UNROUNDED CI): surface every WORKING edge with equal
     # prominence; never only-caution.
@@ -339,11 +351,24 @@ def format_playbook_advisory(agg: dict, *, book_flat: bool = False,
         if weak:
             lines.append(f"  SIZE-DOWN (not avoid): {', '.join(weak)} is underperforming — demand "
                          "extra confirmation / smaller size, but keep taking qualifying setups.")
+    # SOFT per-(side x regime) leans below the hard bar (regime cells in [regime_min_n, min_n)) —
+    # named so the RM can CONCENTRATE size on the proven cell and size-down the proven-weak one,
+    # without overclaiming significance (these are leans, not a statistically-'WORKING' edge).
+    lean_fav = [nm for nm, b in regime.items()
+                if regime_min_n <= b["n"] < min_n and b.get("direction_sign") == "pos"]
+    lean_weak = [nm for nm, b in regime.items()
+                 if regime_min_n <= b["n"] < min_n and b.get("direction_sign") == "neg"]
+    if lean_fav:
+        lines.append(f"  LEANING (thin sample, soft): {', '.join(lean_fav)} leans favorable — "
+                     "concentrate size here when a setup clears the gate.")
+    if lean_weak and not book_flat:
+        lines.append(f"  LEANING (thin sample, soft): {', '.join(lean_weak)} leans weak — size "
+                     "down / demand extra confirmation (not avoid).")
     rc = cov.get("regime_coverage", {})
     lines.append(f"  coverage: {cov.get('n_classified', 0)} classified of {n_closed} closed "
                  f"(dropped {cov.get('n_dropped', 0)}, no-regime {cov.get('n_unjoinable', 0)}); "
                  f"per-regime risk_off={rc.get('risk_off', 0)} risk_on={rc.get('risk_on', 0)} "
-                 f"mixed={rc.get('mixed', 0)} — regime cells below n={min_n} POOLED, not shown.")
+                 f"mixed={rc.get('mixed', 0)} — regime cells below n={regime_min_n} POOLED.")
     return "\n".join(lines)
 
 

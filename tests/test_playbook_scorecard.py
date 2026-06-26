@@ -115,11 +115,46 @@ def test_long_short_R_symmetry():
 
 # --------------------------------------------------------------------------- min-n gate
 def test_no_directive_or_number_below_min_n():
-    decs = [_rec(direction="long", cycle=20, pnl=30.0) for _ in range(3)]   # n=3 < 8
+    decs = [_rec(direction="long", cycle=20, pnl=30.0) for _ in range(3)]   # n=3 < 8 AND < 4
     agg = P.aggregate_playbook(decs, {20: "risk_on"})
     out = P.format_playbook_advisory(agg, total_closed=3, dormancy_n=0)
     assert "insufficient sample" in out
     assert "net " not in out.split("long book")[1].split("\n")[0]   # no R number on the long line
+
+
+# ----------------------------------------------------- regime cells surface at the lower floor (#5)
+def test_regime_cell_surfaces_at_lower_floor_as_leaning_not_working():
+    # 6 short/with-regime trades (risk_off), strongly positive but n in [REGIME_MIN_N(4), MIN_N(8)):
+    # the cell must SURFACE (not "insufficient", not pooled) as a SOFT "leaning favorable" read, and
+    # must NOT be minted as the hard "WORKING — favor it" / EDGE WORKING (those still need n>=8).
+    rs = [2.0, 1.5, 1.8, 1.4, 2.2, 1.6]                      # n=6, all positive, CI clear of 0
+    decs = [_rec(direction="short", cycle=21, pnl=r * 10) for r in rs]
+    agg = P.aggregate_playbook(decs, {21: "risk_off"})
+    assert "short/with-regime" in agg["regime_buckets"]      # surfaced at n=6 (pooled away at n>=8)
+    b = agg["regime_buckets"]["short/with-regime"]
+    assert b["n"] == 6 and b["direction_sign"] == "pos"
+    assert b.get("significant") is False                     # n<8 -> never significant
+    out = P.format_playbook_advisory(agg, total_closed=6, dormancy_n=0)
+    assert "short/with-regime" in out and "leaning favorable" in out
+    assert "WORKING — favor it" not in out                   # no hard WORKING verdict at n=6
+    assert "EDGE WORKING" not in out                         # no hard callout at n=6
+    assert "LEANING (thin sample, soft)" in out              # the soft concentrate-here line
+
+
+def test_regime_cell_below_regime_floor_still_pooled():
+    # n=3 < REGIME_MIN_N(4) -> still pooled away, not surfaced (the floor is 4, not 1).
+    decs = [_rec(direction="short", cycle=21, pnl=20.0) for _ in range(3)]
+    agg = P.aggregate_playbook(decs, {21: "risk_off"})
+    assert "short/with-regime" not in agg["regime_buckets"]
+
+
+def test_regime_significance_still_needs_min_n_not_regime_floor():
+    # a thin (n=6) regime cell is NOT in the Holm significance family even if its raw p is tiny:
+    # significance (the hard WORKING bar) still requires n>=MIN_N(8).
+    rs = [2.0, 2.0, 2.0, 2.0, 2.0, 2.0]                      # n=6, zero-dispersion-ish, strong +
+    decs = [_rec(direction="short", cycle=21, pnl=r * 10) for r in rs]
+    agg = P.aggregate_playbook(decs, {21: "risk_off"})
+    assert agg["regime_buckets"]["short/with-regime"].get("significant") is False
 
 
 # ------------------------------------------------------------------------ expectancy-not-hit-rate
