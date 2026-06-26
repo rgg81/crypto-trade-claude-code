@@ -157,6 +157,26 @@ def test_regime_significance_still_needs_min_n_not_regime_floor():
     assert agg["regime_buckets"]["short/with-regime"].get("significant") is False
 
 
+def test_regime_leaning_band_long_short_symmetry():
+    # HARD RULE 5 (long/short co-equal): long and short must be treated IDENTICALLY within the NEW
+    # [REGIME_MIN_N, MIN_N) leaning band — the existing symmetry test uses n=9, above the floor, so
+    # a regression inside the band would slip through. Mirror 6 long/with-regime (risk_on) and 6
+    # short/with-regime (risk_off) with the SAME R-set -> byte-identical surfaced cells + advisory.
+    rs = [2.0, 1.5, 1.8, 1.4, 2.2, -1.0]                     # n=6 each (in the [4,8) band)
+    longs = [_rec(direction="long", cycle=20, pnl=r * 10) for r in rs]
+    shorts = [_rec(direction="short", cycle=21, pnl=r * 10) for r in rs]
+    agg = P.aggregate_playbook(longs + shorts, {20: "risk_on", 21: "risk_off"})
+    lw = agg["regime_buckets"]["long/with-regime"]
+    sw = agg["regime_buckets"]["short/with-regime"]
+    assert lw["n"] == 6 and sw["n"] == 6
+    assert lw["net_r_mean"] == sw["net_r_mean"] and lw["net_r_ci"] == sw["net_r_ci"]
+    assert lw["direction_sign"] == sw["direction_sign"]
+    assert lw.get("significant") == sw.get("significant")    # both False (n<8), symmetrically
+    out = P.format_playbook_advisory(agg, total_closed=12, dormancy_n=0)
+    # whichever lean the mirrored R-set produces, BOTH sides appear with equal prominence
+    assert ("long/with-regime" in out) and ("short/with-regime" in out)
+
+
 # ------------------------------------------------------------------------ expectancy-not-hit-rate
 def test_low_hit_positive_expectancy_is_never_caution():
     # 8 trades, hit 25% (2/8) but +0.5R expectancy -> favorable/inconclusive, NEVER caution
