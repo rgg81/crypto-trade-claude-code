@@ -45,31 +45,68 @@ class PacingState:
     days_elapsed: float
     days_in_month: int
     directive: str          # human guidance injected into the team's prompts
+    # Dual-anchor sustained-line context (None when no since-seed basis was supplied). `pace_gap`
+    # above is the OPERATIVE (more-behind) gap; these expose the since-seed leg that may drive it.
+    since_seed_return: float | None = None
+    seed_pace_gap: float | None = None
 
 
-def _directive(mode: str, pace_gap: float, mtd: float, target: float) -> str:
+def _sustained_clause(since_seed: float | None, seed_gap: float | None, target: float) -> str:
+    """A short clause naming the SINCE-SEED (multi-month) position, appended to the directive so the
+    team always sees the sustained line — not just the calendar MTD, which can flatter off a
+    prior-month low. Empty when no since-seed basis was supplied."""
+    if since_seed is None or seed_gap is None:
+        return ""
+    side = "BEHIND" if seed_gap < 0 else "ahead of"
+    return (f" SUSTAINED: since-seed {since_seed:+.1%}, {side} the {target:.0%}/mo line by "
+            f"{seed_gap:+.1%} (operative pace_gap is the more-behind of calendar vs sustained).")
+
+
+def _directive(mode: str, pace_gap: float, mtd: float, target: float,
+               since_seed: float | None = None, seed_gap: float | None = None) -> str:
+    tail = _sustained_clause(since_seed, seed_gap, target)
     if mode == "throttle":
         return (f"THROTTLE — month-to-date {mtd:+.1%} has reached the {target:.0%} target. Be "
-                f"selective, bank winners, protect the month; only take A+ setups.")
+                f"selective, bank winners, protect the month; only take A+ setups." + tail)
     if mode == "press":
         return (f"PRESS — behind pace by {pace_gap:+.1%} with unused budget, no drawdown. "
                 f"DEPLOY: take EVERY gate-clearing edge-aligned setup at full size (risk_mult "
                 f"1.0), lower the take-it bar, hunt setups across ALL regimes (trend, "
                 f"range/mean-reversion, relative-value). Rate `flat` ONLY on a failed thesis, "
-                f"never for want of looking — flat has negative carry vs the {target:.0%}/mo goal.")
+                f"never for want of looking — flat has negative carry vs the {target:.0%}/mo "
+                f"goal." + tail)
     if mode == "soft":
         return ("SOFT — start the month conservatively (early month, or in drawdown deferring to "
-                "the breakers). Take only clean high-conviction setups; preserve optionality.")
+                "the breakers). Take only clean high-conviction setups; preserve optionality."
+                + tail)
     return ("NORMAL — roughly on pace. Take clean edge-aligned setups at standard size; keep the "
-            "book working toward the monthly target.")
+            "book working toward the monthly target." + tail)
 
 
 def compute_pacing(*, mtd_return: float, days_elapsed: float, days_in_month: int,
-                   drawdown: float, open_heat: float, monthly_target: float = 0.05) -> PacingState:
-    """Pure pacing logic (no I/O). See module docstring for the safety invariants."""
+                   drawdown: float, open_heat: float, monthly_target: float = 0.05,
+                   since_seed_return: float | None = None,
+                   days_since_seed: float | None = None) -> PacingState:
+    """Pure pacing logic (no I/O). See module docstring for the safety invariants.
+
+    DUAL-ANCHOR: the calendar MTD is anchored to the month start, so a month that reads on-pace off
+    a prior-month LOW can mask multi-month underperformance (the desk coasts "on pace" while behind
+    the sustained 5%/mo line). When a since-seed basis is supplied, the OPERATIVE `pace_gap` is the
+    MORE-BEHIND (min) of the calendar gap and the since-seed gap, so `press` arms honestly against
+    the sustained line. The anti-martingale and throttle invariants are unchanged: a since-seed lag
+    can never press during a drawdown, and a calendar month at/above target still throttles."""
     dim = max(1, int(days_in_month))
     pace = monthly_target * (max(0.0, days_elapsed) / dim)
-    pace_gap = mtd_return - pace
+    calendar_gap = mtd_return - pace
+    seed_pace_gap: float | None = None
+    if since_seed_return is not None and days_since_seed is not None:
+        # Sustained pace uses the canonical 30-day month (5%/mo applies across months, not a single
+        # calendar grid). Operative gap = the more-behind leg.
+        seed_pace = monthly_target * (max(0.0, days_since_seed) / 30.0)
+        seed_pace_gap = since_seed_return - seed_pace
+        pace_gap = min(calendar_gap, seed_pace_gap)
+    else:
+        pace_gap = calendar_gap
     in_dd = drawdown >= CAUTION_DD
 
     if mtd_return >= monthly_target:
@@ -79,7 +116,7 @@ def compute_pacing(*, mtd_return: float, days_elapsed: float, days_in_month: int
     elif days_elapsed < SOFT_DAYS:
         mode = "soft"                       # start the month soft
     elif pace_gap <= -PRESS_GAP and open_heat < PRESS_UTIL_HEAT:
-        mode = "press"                      # behind + under-deployed + healthy -> deploy
+        mode = "press"                      # behind (either anchor) + under-deployed + healthy
     else:
         mode = "normal"
 
@@ -87,7 +124,9 @@ def compute_pacing(*, mtd_return: float, days_elapsed: float, days_in_month: int
         mode=mode, appetite=_MODE_APPETITE[mode], suggested_risk_mult=_MODE_RISK_MULT[mode],
         mtd_return=mtd_return, pace=pace, pace_gap=pace_gap, drawdown=drawdown, open_heat=open_heat,
         in_drawdown=in_dd, days_elapsed=days_elapsed, days_in_month=dim,
-        directive=_directive(mode, pace_gap, mtd_return, monthly_target),
+        directive=_directive(mode, pace_gap, mtd_return, monthly_target,
+                             since_seed_return, seed_pace_gap),
+        since_seed_return=since_seed_return, seed_pace_gap=seed_pace_gap,
     )
 
 
@@ -123,5 +162,11 @@ def pacing_state(state_dir, now: datetime, health, *, monthly_target: float = 0.
     base = at_or_before[-1] if at_or_before else series[0][1]
     last = series[-1][1]
     mtd = (last / base - 1.0) if base > 0 else 0.0
+    # Since-seed (sustained) leg: the earliest logged equity point is the seed anchor. Drives the
+    # dual-anchor so a calendar month off a prior-month low cannot mask multi-month lag.
+    seed_ts, seed_base = series[0]
+    since_seed = (last / seed_base - 1.0) if seed_base > 0 else 0.0
+    days_since_seed = (now - seed_ts).total_seconds() / 86400.0
     return compute_pacing(mtd_return=mtd, days_elapsed=days_elapsed, days_in_month=dim,
-                          drawdown=dd, open_heat=heat, monthly_target=monthly_target)
+                          drawdown=dd, open_heat=heat, monthly_target=monthly_target,
+                          since_seed_return=since_seed, days_since_seed=days_since_seed)
