@@ -130,6 +130,42 @@ def compute_pacing(*, mtd_return: float, days_elapsed: float, days_in_month: int
     )
 
 
+def performance_block(ps: PacingState, *, n_open: int = 0, n_armed: int = 0,
+                      monthly_target: float = 0.05) -> str:
+    """A ready-to-inject performance-vs-target block for EVERY agent prompt (Watcher, the 4
+    analysts, screen, Bull/Bear, RM, Trader). It exists so the whole team sees where the desk stands
+    against the 5%/mo goal on the SUSTAINED (since-seed) line — not just the calendar MTD, which
+    flatters off a prior-month low. Two-sided by construction: a CALIBRATION line that says deploy
+    real edges when behind, and a GUARDRAIL line forbidding forced low-conviction trades. No-I/O."""
+    if ps.seed_pace_gap is not None and ps.since_seed_return is not None:
+        if ps.seed_pace_gap < 0:
+            side = "BEHIND"
+        elif ps.seed_pace_gap > 0:
+            side = "AHEAD of"
+        else:
+            side = "ON"
+        sustained = (f"since-seed {ps.since_seed_return:+.1%}, {side} the {monthly_target:.0%}/mo "
+                     f"line by {ps.seed_pace_gap:+.1%}")
+    else:
+        side = "BEHIND" if ps.pace_gap < 0 else "AHEAD of" if ps.pace_gap > 0 else "ON"
+        sustained = f"{side} the {monthly_target:.0%}/mo pace by {ps.pace_gap:+.1%}"
+    header = (f"PERFORMANCE vs TARGET (goal {monthly_target:.0%}/mo): {sustained}. Calendar MTD "
+              f"{ps.mtd_return:+.1%}. Pacing mode {ps.mode.upper()} (suggested risk_mult "
+              f"{ps.suggested_risk_mult:g}). Deployment: {n_open} open, {n_armed} armed.")
+    calibration = (
+        "CALIBRATION: when BEHIND, surface and rate EVERY gate-clearing, edge-aligned setup as "
+        "ACTIONABLE across ALL regimes — idle cash has negative carry, and an expired unfired "
+        "trigger is a missed edge, not a saved loss. Prefer fillable-now entries (market / "
+        "limit-fade) over breakout stop_entries in low-ADX chop. Size proven with-regime setups "
+        "at full conviction.")
+    guardrail = (
+        "GUARDRAIL: NEVER force a low-conviction, counter-edge, or sub-floor-RR trade to hit the "
+        "number. The gate (RR>=floor, heat, liq-distance) is the backstop — a setup that clears it "
+        "is BY DEFINITION not forcing. Below target is a reason to look harder, never to lower the "
+        "bar.")
+    return f"{header}\n{calibration}\n{guardrail}"
+
+
 def _month_start(now: datetime) -> datetime:
     return now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 

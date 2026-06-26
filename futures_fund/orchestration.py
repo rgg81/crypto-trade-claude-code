@@ -186,12 +186,23 @@ def preflight_step(exchange, settings: Settings, state_dir, memory_dir,
     # throttle) the team reads to actively pursue 5%/mo. Advisory/utilization-only; anti-martingale
     # (drawdown never presses); the gate's protected caps are unchanged. Fail-safe -> soft on error.
     try:
-        from futures_fund.pacing import pacing_state
+        from futures_fund.pacing import pacing_state, performance_block
         _ps = pacing_state(state_dir, now, health, monthly_target=0.05)
+        # Armed-trigger count for the deployment line (advisory; never break the cycle on a read).
+        try:
+            from futures_fund.pending_orders import load_pending_orders
+            _n_armed = len(load_pending_orders(state_dir))
+        except Exception:  # noqa: BLE001
+            _n_armed = 0
         pacing = {"mode": _ps.mode, "appetite": _ps.appetite,
                   "suggested_risk_mult": _ps.suggested_risk_mult, "mtd_return": _ps.mtd_return,
                   "pace": _ps.pace, "pace_gap": _ps.pace_gap, "in_drawdown": _ps.in_drawdown,
-                  "directive": _ps.directive}
+                  "since_seed_return": _ps.since_seed_return, "seed_pace_gap": _ps.seed_pace_gap,
+                  "directive": _ps.directive,
+                  # Ready-to-inject performance-vs-5%/mo block — SKILL.md mandates the orchestrator
+                  # paste this verbatim into EVERY agent prompt (analysts/screen/debate/RM/Trader).
+                  "performance_block": performance_block(_ps, n_open=len(positions),
+                                                         n_armed=_n_armed)}
     except Exception:  # noqa: BLE001 — pacing is advisory; never break the cycle
         pacing = {"mode": "soft", "directive": "SOFT — pacing unavailable; trade conservatively.",
                   "suggested_risk_mult": 0.5}

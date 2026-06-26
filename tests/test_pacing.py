@@ -8,6 +8,7 @@ from futures_fund.pacing import (
     PRESS_GAP,
     compute_pacing,
     pacing_state,
+    performance_block,
 )
 
 
@@ -186,3 +187,35 @@ def test_pacing_state_dual_anchor_presses_on_sustained_lag(tmp_path):
     s = pacing_state(state, datetime(2026, 6, 25, tzinfo=UTC), _H(), monthly_target=0.05)
     assert s.seed_pace_gap is not None and s.seed_pace_gap < 0
     assert s.mode == "press"
+
+
+# --- performance_block: the ready-to-inject "share to ALL agents" performance-vs-target block ---
+
+def test_performance_block_surfaces_sustained_position_and_guardrail():
+    s = compute_pacing(mtd_return=0.0478, days_elapsed=26, days_in_month=30, drawdown=0.0,
+                       open_heat=0.0, monthly_target=0.05,
+                       since_seed_return=0.0321, days_since_seed=56)
+    blk = performance_block(s, n_open=0, n_armed=2)
+    assert "5%/mo" in blk
+    assert "BEHIND" in blk                       # sustained position is named
+    assert "since-seed" in blk.lower()
+    assert "+3.2%" in blk                         # the since-seed number is shown
+    assert "GUARDRAIL" in blk and "force" in blk.lower()   # the no-forcing guardrail is present
+    assert "0 open" in blk and "2 armed" in blk   # deployment counts surfaced
+
+
+def test_performance_block_ahead_reads_ahead_not_behind():
+    s = compute_pacing(mtd_return=0.03, days_elapsed=10, days_in_month=30, drawdown=0.0,
+                       open_heat=0.0, monthly_target=0.05,
+                       since_seed_return=0.08, days_since_seed=30)   # +8% in a month -> ahead
+    blk = performance_block(s, n_open=1, n_armed=0)
+    # the sustained-position clause reads AHEAD (the CALIBRATION line always contains the word
+    # "BEHIND" as guidance, so assert on the specific position phrase, not bare substring presence).
+    assert "AHEAD of the 5%/mo line" in blk
+
+
+def test_performance_block_no_seed_basis_falls_back_to_calendar():
+    s = compute_pacing(mtd_return=0.01, days_elapsed=15, days_in_month=30, drawdown=0.0,
+                       open_heat=0.0, monthly_target=0.05)   # no since-seed inputs
+    blk = performance_block(s, n_open=0, n_armed=0)
+    assert "5%/mo" in blk and "GUARDRAIL" in blk   # still emits a usable block
