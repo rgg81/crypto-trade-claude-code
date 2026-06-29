@@ -507,3 +507,25 @@ def test_stop_entry_unreachable_arm_guard():
                             trigger_level=90.0, stop=99.0, take_profits=[80.0], atr=0.0,
                             created_cycle=1, expires_cycle=99)
     assert not stop_entry_unreachable(zero_atr, 100.0)
+
+
+def test_adaptive_expiry_cycles_scales_with_reach():
+    # cy152 follow-up: a farther (but reachable) stop_entry needs more 4h bars to travel to AND
+    # close through its level, so its expiry window is floored by reach: lo + ceil(reach/0.5),
+    # clamped [MIN_EXPIRY_CYCLES=2, MAX_EXPIRY_CYCLES=6]. A near trigger keeps the short window.
+    from futures_fund.pending_orders import (
+        MAX_EXPIRY_CYCLES,
+        MIN_EXPIRY_CYCLES,
+        adaptive_expiry_cycles,
+    )
+    assert (MIN_EXPIRY_CYCLES, MAX_EXPIRY_CYCLES) == (2, 6)
+    assert adaptive_expiry_cycles(0.0) == 2       # at the mark -> the floor window
+    assert adaptive_expiry_cycles(0.5) == 3       # 2 + ceil(1.0)
+    assert adaptive_expiry_cycles(1.0) == 4       # 2 + ceil(2.0)
+    assert adaptive_expiry_cycles(1.4) == 5       # 2 + ceil(2.8) -> 2+3
+    assert adaptive_expiry_cycles(2.0) == 6       # 2 + ceil(4.0)
+    assert adaptive_expiry_cycles(5.0) == 6       # clamped at MAX (trend breakouts can sit far)
+    # fail-safe: non-finite / negative reach -> the floor window (never shortens below lo)
+    assert adaptive_expiry_cycles(float("nan")) == 2
+    assert adaptive_expiry_cycles(-1.0) == 2
+    assert adaptive_expiry_cycles(None) == 2

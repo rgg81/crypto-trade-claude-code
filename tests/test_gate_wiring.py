@@ -622,6 +622,29 @@ def test_gate_reachability_guard_spares_trend_quadrant(tmp_path):
     assert report["triggers_armed"] == 1                 # trend breakdown armed normally
 
 
+def test_gate_extends_short_expiry_for_reachable_stop_entry_by_reach(tmp_path):
+    # cy152 follow-up to CP10: a reachable but farther stop_entry needs more than the team's 2-cycle
+    # (8h) window to travel to AND close through its level. The arm path FLOORS expiry by reach:
+    # reach ~1.0 ATR -> 2 + ceil(1.0/0.5) = 4 cycles -> expires_cycle = created(1) + 4 = 5, raising
+    # the team's stingy expires_cycle=3. Never shortens; routes through the same gate at fire.
+    state_dir, memory_dir = tmp_path / "s", tmp_path / "m"
+    ex = FakeExchange({"BTC/USDT:USDT": _range_flat()})
+    last = _pf(state_dir, memory_dir, ex)["briefs"][0]["last_close"]
+    report = gate_execute_step(
+        ex, _settings(), state_dir, memory_dir, now=NOW, cycle_no=1, proposals=[],
+        regime_state=_regime("risk_off"),
+        triggers=[
+            # SHORT breakdown 1.0 ATR below the mark (reachable, RR 4), team set a stingy +2 expiry
+            {"symbol": "BTCUSDT", "direction": "short", "kind": "stop_entry",
+             "trigger_level": last - 2.0, "stop": last - 0.5,
+             "take_profits": [last - 8.0], "atr": 2.0, "expires_cycle": 3},
+        ])
+    assert report["triggers_armed"] == 1
+    assert report["triggers_expiry_extended"] == 1
+    stored = load_pending_orders(state_dir)
+    assert len(stored) == 1 and stored[0].expires_cycle == 5      # created 1 + adaptive 4
+
+
 def test_gate_keeps_unstamped_trigger_and_does_not_autocancel(tmp_path):
     # an UNSTAMPED prior trigger (no arm-time anchor) is never auto-canceled, even with swing_low
     # below it: a non-firing short stays armed (proves stamping is REQUIRED to retire a trigger).

@@ -753,6 +753,7 @@ def gate_execute_step(exchange, settings: Settings, state_dir, memory_dir,
     low_rr_actions: list = []
     triggers_refused_unreachable = 0
     unreachable_actions: list = []
+    triggers_expiry_extended = 0
 
     def _noncrypto(raw: str) -> bool:  # True iff the gate must REFUSE this symbol (fail-closed)
         return _is_crypto_raw is not None and not _is_crypto_raw(raw)
@@ -1171,6 +1172,25 @@ def gate_execute_step(exchange, settings: Settings, state_dir, memory_dir,
                     f"refused UNREACHABLE arm {o.direction} {o.kind} {o.symbol} @ "
                     f"{o.trigger_level} — {dist:.1f} ATR from mark {mk} in {q}; re-place as a "
                     f"reachable limit_entry fade or a breakdown within ~1 ATR of the floor")
+    # ADAPTIVE-EXPIRY floor (cy152 follow-up to CP10): a reachable but FARTHER stop_entry needs more
+    # 4h bars to travel to AND close THROUGH its level, so floor its expiry window by reach. The
+    # cy139-152 triggers all ran a 2-cycle/8h window — too short even for the reachable ones. Only
+    # RAISES a too-short expiry (never shortens the team's choice); routes through the same gate at
+    # fire and the stale-trigger revalidation cancels any drifted level. Symmetric long/short.
+    if new_triggers:
+        from futures_fund.pending_orders import adaptive_expiry_cycles
+        for o in new_triggers:
+            if o.kind != "stop_entry" or not o.atr or o.atr <= 0:
+                continue
+            mk = ctx.prices.get(o.symbol)
+            try:
+                reach = abs(float(mk) - o.trigger_level) / o.atr
+            except (TypeError, ValueError):
+                continue
+            floor_expiry = o.created_cycle + adaptive_expiry_cycles(reach)
+            if floor_expiry > o.expires_cycle:
+                o.expires_cycle = floor_expiry
+                triggers_expiry_extended += 1
     save_pending_orders(state_dir, upsert_triggers(remaining, new_triggers))
     if isinstance(regime_state, dict):
         try:
@@ -1199,6 +1219,7 @@ def gate_execute_step(exchange, settings: Settings, state_dir, memory_dir,
     if unreachable_actions:                          # surface each (Rule 6): re-place reachable
         report.setdefault("actions", []).extend(unreachable_actions)
         report.setdefault("warnings", []).extend(unreachable_actions)
+    report["triggers_expiry_extended"] = triggers_expiry_extended  # reach-floored expiry windows
     report["proposals_rerouted"] = len(_rerouted)    # resting orders misrouted into proposals
     if reroute_actions:                              # surface each (Rule 6, fail-loud)
         report.setdefault("actions", []).extend(reroute_actions)

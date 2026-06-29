@@ -40,6 +40,31 @@ STALE_TRIGGER_PCT_FALLBACK = 0.0025
 # sparing the closest ones with a genuine chance. Symmetric across long/short.
 REACH_MAX_ATR = 1.5
 
+# Adaptive-expiry window for a stop_entry, by reach. A stop_entry must travel to its level AND
+# close THROUGH it; the farther the level (in ATR from the mark), the more 4h bars that takes, so a
+# near trigger expiring in 8h is fine but a farther one needs a longer window (cy139-152 ran every
+# trigger on a 2-cycle/8h window — too short even for the reachable ones). One extra cycle of life
+# per EXPIRY_ATR_STEP ATR of reach, on top of the floor, clamped [MIN, MAX]. Symmetric long/short.
+MIN_EXPIRY_CYCLES = 2
+MAX_EXPIRY_CYCLES = 6
+EXPIRY_ATR_STEP = 0.5
+
+
+def adaptive_expiry_cycles(reach_atr, *, lo: int = MIN_EXPIRY_CYCLES,
+                           hi: int = MAX_EXPIRY_CYCLES) -> int:
+    """Minimum cycle-count expiry window for a stop_entry whose level sits `reach_atr` ATR from the
+    mark: lo + ceil(reach_atr / EXPIRY_ATR_STEP), clamped to [lo, hi]. A level at the mark keeps the
+    floor window; a farther (but reachable) level gets proportionally longer to print its
+    close-through. FAIL-SAFE: a missing/non-finite/negative reach -> lo (never shorter than the
+    floor). Pure; the caller only ever RAISES a too-short expiry with this, never shortens one."""
+    try:
+        r = float(reach_atr)
+        if not math.isfinite(r) or r < 0:
+            return lo
+    except (TypeError, ValueError):
+        return lo
+    return max(lo, min(hi, lo + math.ceil(r / EXPIRY_ATR_STEP)))
+
 
 class PendingOrder(BaseModel):
     id: str = Field(default_factory=lambda: uuid.uuid4().hex)
