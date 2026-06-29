@@ -751,6 +751,8 @@ def gate_execute_step(exchange, settings: Settings, state_dir, memory_dir,
     noncrypto_actions: list = []
     triggers_refused_low_rr = 0
     low_rr_actions: list = []
+    triggers_refused_unreachable = 0
+    unreachable_actions: list = []
 
     def _noncrypto(raw: str) -> bool:  # True iff the gate must REFUSE this symbol (fail-closed)
         return _is_crypto_raw is not None and not _is_crypto_raw(raw)
@@ -1140,6 +1142,35 @@ def gate_execute_step(exchange, settings: Settings, state_dir, memory_dir,
                 low_rr_actions.append(
                     f"refused LOW-RR arm {o.direction} {o.kind} {o.symbol} @ {o.trigger_level} — "
                     f"RR {trigger_rr(o):.2f} < floor {floor:.2f}; re-spec or stand aside")
+    # CP10 ARM-TIME REACHABILITY guard (range quadrants only): never arm a stop_entry whose level
+    # sits so many ATR beyond the mark that it cannot print a CLOSE-through inside its short expiry
+    # window. cy139-152: 22/27 arms were breakdown stop_entries a median ~2.0 ATR below the mark in
+    # coiling ranges -> 0/27 ever fired (price oscillates off the band, never closing through). In a
+    # RANGE quadrant a far breakdown is structurally un-fireable; the team re-places a reachable
+    # limit_entry FADE (fills on a touch) per the SKILL range-quadrant rule. SCOPED to range
+    # quadrants so genuine TREND-quadrant breakouts (which do run to their level) are untouched.
+    # Refuse-only — never opens/sizes; symmetric long/short; gate stays the RR/heat/liq backstop.
+    if new_triggers:
+        from futures_fund.pending_orders import stop_entry_unreachable
+        _RANGE_Q = {"low_vol_range", "high_vol_range"}
+        kept_reach, unreachable = [], []
+        for o in new_triggers:
+            q = quadrant_by_symbol.get(o.symbol)
+            mk = ctx.prices.get(o.symbol)
+            (unreachable if (q in _RANGE_Q and stop_entry_unreachable(o, mk))
+             else kept_reach).append(o)
+        if unreachable:
+            new_triggers = kept_reach
+            triggers_refused_unreachable += len(unreachable)
+            for o in unreachable:
+                mk = ctx.prices.get(o.symbol)
+                # o is unreachable -> stop_entry_unreachable already guaranteed atr>0 finite + mk
+                # finite, so this division is safe.
+                dist = abs(float(mk) - o.trigger_level) / o.atr
+                unreachable_actions.append(
+                    f"refused UNREACHABLE arm {o.direction} {o.kind} {o.symbol} @ "
+                    f"{o.trigger_level} — {dist:.1f} ATR from mark {mk} in {q}; re-place as a "
+                    f"reachable limit_entry fade or a breakdown within ~1 ATR of the floor")
     save_pending_orders(state_dir, upsert_triggers(remaining, new_triggers))
     if isinstance(regime_state, dict):
         try:
@@ -1164,6 +1195,10 @@ def gate_execute_step(exchange, settings: Settings, state_dir, memory_dir,
     if low_rr_actions:                               # surface each (Rule 6): re-spec or stand aside
         report.setdefault("actions", []).extend(low_rr_actions)
         report.setdefault("warnings", []).extend(low_rr_actions)
+    report["triggers_refused_unreachable"] = triggers_refused_unreachable  # un-fireable range arms
+    if unreachable_actions:                          # surface each (Rule 6): re-place reachable
+        report.setdefault("actions", []).extend(unreachable_actions)
+        report.setdefault("warnings", []).extend(unreachable_actions)
     report["proposals_rerouted"] = len(_rerouted)    # resting orders misrouted into proposals
     if reroute_actions:                              # surface each (Rule 6, fail-loud)
         report.setdefault("actions", []).extend(reroute_actions)

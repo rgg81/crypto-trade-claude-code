@@ -563,6 +563,65 @@ def test_gate_refuses_sub_rr_trigger_at_arm_keeps_clean_one(tmp_path):
     assert any("refused LOW-RR" in a for a in report.get("warnings", []))
 
 
+def _range_flat(n=60):
+    # ~100 flat (low_vol_range quadrant on the completed frame) -> the coiling-range tape where the
+    # cy139-152 far breakdown stop_entries never fired.
+    import numpy as np
+    import pandas as pd
+    closes = np.full(n, 100.0) + np.random.default_rng(7).normal(0, 0.02, n)
+    return pd.DataFrame({
+        "timestamp": pd.date_range("2026-01-01", periods=n, freq="4h", tz="UTC"),
+        "open": closes, "high": closes + 0.2, "low": closes - 0.2, "close": closes, "volume": 1.0})
+
+
+def test_gate_refuses_unreachable_breakdown_in_range_keeps_reachable(tmp_path):
+    # CP10 arm-time REACHABILITY guard (cy152, 0/27 fire rate): in a RANGE quadrant a stop_entry
+    # placed >1.5 ATR beyond the mark cannot print a CLOSE-through inside its expiry -> REFUSED at
+    # arm (never written), while a reachable (<=1.5 ATR) trigger on a distinct key arms normally.
+    # Refuse-only, never opens; symmetric long/short; the RR>=2 / wrong-side guards still apply.
+    state_dir, memory_dir = tmp_path / "s", tmp_path / "m"
+    ex = FakeExchange({"BTC/USDT:USDT": _range_flat()})
+    last = _pf(state_dir, memory_dir, ex)["briefs"][0]["last_close"]
+    report = gate_execute_step(
+        ex, _settings(), state_dir, memory_dir, now=NOW, cycle_no=1, proposals=[],
+        regime_state=_regime("risk_off"),
+        triggers=[
+            # SHORT breakdown 2.0 ATR below the mark -> unreachable in range -> refused
+            {"symbol": "BTCUSDT", "direction": "short", "kind": "stop_entry",
+             "trigger_level": last - 4.0, "stop": last - 2.0,
+             "take_profits": [last - 16.0], "atr": 2.0},
+            # LONG breakout 1.0 ATR above the mark (distinct key), RR 6 -> reachable -> armed
+            {"symbol": "BTCUSDT", "direction": "long", "kind": "stop_entry",
+             "trigger_level": last + 2.0, "stop": last,
+             "take_profits": [last + 14.0], "atr": 2.0},
+        ])
+    assert report["triggers_refused_unreachable"] == 1
+    assert report["triggers_armed"] == 1                 # only the reachable trigger
+    stored = load_pending_orders(state_dir)
+    assert {o.direction for o in stored} == {"long"}     # the far short was NOT persisted
+    assert report["opened"] == 0                         # refuse-only, nothing opened
+    assert any("UNREACHABLE" in a for a in report.get("warnings", []))
+
+
+def test_gate_reachability_guard_spares_trend_quadrant(tmp_path):
+    # Scope guard: the reachability veto is RANGE-only. In a TREND quadrant a far breakdown CAN run
+    # to its level, so a 2-ATR-away short is NOT refused as unreachable (it arms normally). This is
+    # what keeps the fix from over-vetoing genuine trend continuation entries.
+    state_dir, memory_dir = tmp_path / "s", tmp_path / "m"
+    ex = FakeExchange({"BTC/USDT:USDT": _uptrend()})     # trend quadrant, not range
+    last = _pf(state_dir, memory_dir, ex)["briefs"][0]["last_close"]
+    report = gate_execute_step(
+        ex, _settings(), state_dir, memory_dir, now=NOW, cycle_no=1, proposals=[],
+        regime_state=_regime("risk_off"),
+        triggers=[
+            {"symbol": "BTCUSDT", "direction": "short", "kind": "stop_entry",
+             "trigger_level": last - 4.0, "stop": last - 2.0,
+             "take_profits": [last - 16.0], "atr": 2.0},      # 2 ATR away but TREND -> not refused
+        ])
+    assert report["triggers_refused_unreachable"] == 0
+    assert report["triggers_armed"] == 1                 # trend breakdown armed normally
+
+
 def test_gate_keeps_unstamped_trigger_and_does_not_autocancel(tmp_path):
     # an UNSTAMPED prior trigger (no arm-time anchor) is never auto-canceled, even with swing_low
     # below it: a non-firing short stays armed (proves stamping is REQUIRED to retire a trigger).

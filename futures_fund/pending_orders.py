@@ -31,6 +31,15 @@ OI_RISING_EPS = 0.005
 STALE_TRIGGER_ATR_FRAC = 0.25
 STALE_TRIGGER_PCT_FALLBACK = 0.0025
 
+# Arm-time REACHABILITY deadband. A stop_entry fires only on a 4h CLOSE through its level, so a
+# level sitting many ATR beyond the current mark cannot realistically print that close inside its
+# short expiry window. cy139-152: 22/27 arms were breakdown stop_entries a median ~2.0 ATR below
+# the mark in coiling RANGE quadrants -> 0/27 ever fired (price oscillated off the band, never
+# closing through). REACH_MAX_ATR is the max |mark - level| (in ATR) at which a stop_entry is still
+# judged reachable; 1.5 retires the ~86% of those dead breakdowns that sat >1.5 ATR away while
+# sparing the closest ones with a genuine chance. Symmetric across long/short.
+REACH_MAX_ATR = 1.5
+
 
 class PendingOrder(BaseModel):
     id: str = Field(default_factory=lambda: uuid.uuid4().hex)
@@ -147,6 +156,28 @@ def stop_entry_wrong_side_of_mark(o: PendingOrder, mark) -> bool:
         return False
     return (o.direction == "short" and o.trigger_level >= m) or \
            (o.direction == "long" and o.trigger_level <= m)
+
+
+def stop_entry_unreachable(o: PendingOrder, mark, *, max_atr: float = REACH_MAX_ATR) -> bool:
+    """A stop_entry fires only on a 4h CLOSE beyond its level, so a trigger sitting many ATR past
+    the current mark structurally cannot fire within its short expiry window (the cy139-152 0/27
+    breakdown fire rate: 22 breakdown stop_entries a median ~2.0 ATR below the mark in coiling
+    ranges, none ever closed through). Returns True when a stop_entry's |mark - trigger_level|
+    exceeds max_atr * atr. limit_entry is EXEMPT — it rests on the far side and fills on a TOUCH,
+    not a close-beyond. Symmetric long/short. FAIL-SAFE: a missing/non-finite mark, or
+    atr <= 0 / non-finite -> NOT unreachable (cannot measure -> keep)."""
+    if o.kind != "stop_entry":
+        return False
+    atr = o.atr
+    if not (atr and math.isfinite(atr) and atr > 0):
+        return False
+    try:
+        m = float(mark)
+        if not math.isfinite(m):
+            return False
+    except (TypeError, ValueError):
+        return False
+    return abs(m - o.trigger_level) > max_atr * atr
 
 
 def _oi_confirms(oi_change_by_symbol, symbol: str) -> bool:

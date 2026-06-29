@@ -472,3 +472,38 @@ def test_stop_entry_wrong_side_of_mark_arm_guard():
                                                 trigger=611.0, stop=616.0), 605.0)
     # fail-safe: missing/non-finite mark -> not wrong-side (keep)
     assert not stop_entry_wrong_side_of_mark(_o(direction="short", trigger=611.0, stop=616.0), None)
+
+
+def test_stop_entry_unreachable_arm_guard():
+    # cy152 fix (0/27 fire rate): a stop_entry fires only on a 4h CLOSE through its level, so a
+    # trigger many ATR beyond the mark cannot print that close inside its short expiry window.
+    # REACH_MAX_ATR=1.5 ATR; |mark - trigger_level| > 1.5*atr => unreachable. atr=1.0 via _o, so
+    # the ATR distance equals the raw price distance here. Symmetric long/short.
+    from futures_fund.pending_orders import REACH_MAX_ATR, stop_entry_unreachable
+    assert REACH_MAX_ATR == 1.5
+    # SHORT breakdown 3 ATR below the mark (the cy139-152 dead zone) -> unreachable
+    assert stop_entry_unreachable(_o(direction="short", trigger=97.0, stop=99.0), 100.0)
+    # SHORT breakdown 1 ATR below the mark -> reachable (genuine chance) -> keep
+    assert not stop_entry_unreachable(_o(direction="short", trigger=99.0, stop=101.0), 100.0)
+    # boundary: exactly 1.5 ATR away is NOT > threshold -> reachable
+    assert not stop_entry_unreachable(_o(direction="short", trigger=98.5, stop=100.5), 100.0)
+    assert stop_entry_unreachable(_o(direction="short", trigger=98.4, stop=100.4), 100.0)
+    # LONG breakout mirror: 2 ATR above the mark -> unreachable; 1 ATR -> reachable (no L/S bias)
+    assert stop_entry_unreachable(_o(direction="long", trigger=102.0, stop=100.0), 100.0)
+    assert not stop_entry_unreachable(_o(direction="long", trigger=101.0, stop=99.0), 100.0)
+    # a non-unit ATR scales the threshold: atr=2.0, 2.5-away short -> 1.25 ATR -> reachable
+    near = PendingOrder(symbol="BTCUSDT", direction="short", kind="stop_entry",
+                        trigger_level=97.5, stop=99.0, take_profits=[90.0], atr=2.0,
+                        created_cycle=1, expires_cycle=99)
+    assert not stop_entry_unreachable(near, 100.0)             # 2.5/2.0 = 1.25 ATR <= 1.5
+    far = near.model_copy(update={"trigger_level": 96.0})       # 4.0/2.0 = 2.0 ATR > 1.5
+    assert stop_entry_unreachable(far, 100.0)
+    # limit_entry is EXEMPT (fills on a TOUCH on the far side, not a close-beyond)
+    assert not stop_entry_unreachable(_o(direction="short", kind="limit_entry",
+                                         trigger=97.0, stop=99.0), 100.0)
+    # fail-safe: missing/non-finite mark, or atr<=0/non-finite -> NOT unreachable (can't measure)
+    assert not stop_entry_unreachable(_o(direction="short", trigger=97.0, stop=99.0), None)
+    zero_atr = PendingOrder(symbol="BTCUSDT", direction="short", kind="stop_entry",
+                            trigger_level=90.0, stop=99.0, take_profits=[80.0], atr=0.0,
+                            created_cycle=1, expires_cycle=99)
+    assert not stop_entry_unreachable(zero_atr, 100.0)
