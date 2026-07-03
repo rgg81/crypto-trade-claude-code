@@ -75,6 +75,29 @@ def test_reconcile_ignores_open_decisions():
     assert r["realized_final"] == 100.0  # only the closed one
 
 
+def test_reconcile_accounts_for_open_position_entry_fees():
+    # balance was debited the entry fee when the open position was opened, but the reconcile's
+    # closed-only sum excludes it -> without accounting the residual is a spurious -entry_fee.
+    # A position uses `qty` (not `size`); entry_fee_for must handle both.
+    open_positions = [{"qty": 10.0, "entry": 50.0}]  # notional 500
+    ef_open = 10.0 * 50.0 * TAKER_RATE
+    balance = 10000.0 - ef_open  # balance really got debited the open entry fee
+    # WITHOUT open_positions: spurious residual of -ef_open (the false-positive we are killing)
+    r_blind = reconcile_balance([], balance=balance, seed=10000.0)
+    assert abs(r_blind["residual"] + ef_open) < 1e-9
+    # WITH open_positions: expected includes the open entry fee -> residual ~0, reconciled clean
+    r = reconcile_balance([], balance=balance, seed=10000.0, open_positions=open_positions)
+    assert abs(r["open_entry_fees"] - ef_open) < 1e-9
+    assert abs(r["residual"]) < 1e-9
+
+
+def test_entry_fee_for_handles_position_qty_key():
+    # a Position dict carries `qty`; a closed decision carries `size`. Both must price identically.
+    from_qty = entry_fee_for({"qty": 10.0, "entry": 50.0})
+    from_size = entry_fee_for({"size": 10.0, "entry": 50.0})
+    assert from_qty == from_size == 10.0 * 50.0 * TAKER_RATE
+
+
 def test_match_open_decision_interval_containment():
     decisions = [
         {"id": "a", "symbol": "SOLUSDT", "opened_ts": "2026-06-01T00:00:00Z",

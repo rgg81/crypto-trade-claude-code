@@ -18,13 +18,14 @@ from __future__ import annotations
 from futures_fund.costs import trade_fee
 
 
-def entry_fee_for(decision: dict, *, pay_bnb: bool = False) -> float:
-    """The taker entry fee balance paid at open for this decision (qty * entry notional).
+def entry_fee_for(record: dict, *, pay_bnb: bool = False) -> float:
+    """The taker entry fee balance paid at open for this record (qty * entry notional).
 
     The journal does not store entry_fee, so we re-derive it deterministically from the recorded
-    size/entry — identical to what `executor.open_position` charged at open."""
-    qty = decision.get("size")
-    entry = decision.get("entry")
+    size/entry — identical to what `executor.open_position` charged at open. Accepts either a closed
+    decision (`size`) or an open Position (`qty`); both price identically off the entry notional."""
+    qty = record.get("size") or record.get("qty")
+    entry = record.get("entry")
     if not qty or not entry:
         return 0.0
     return trade_fee(qty * entry, maker=False, pay_bnb=pay_bnb)
@@ -42,21 +43,33 @@ def bank_total(decision: dict) -> float:
 
 
 def reconcile_balance(
-    decisions: list[dict], balance: float, *, seed: float = 10000.0, pay_bnb: bool = False
+    decisions: list[dict],
+    balance: float,
+    *,
+    seed: float = 10000.0,
+    pay_bnb: bool = False,
+    open_positions: list[dict] | None = None,
 ) -> dict:
-    """Re-derive the expected account balance from the closed-trade journal and return the full
-    attribution + residual. A non-zero residual means the journal does not fully explain balance
-    (e.g. an unrecorded scale-out bank — see `unrecorded_banks`)."""
+    """Re-derive the expected account balance and return the full attribution + residual. A non-zero
+    residual means the journal does not fully explain balance (e.g. an unrecorded scale-out bank —
+    see `unrecorded_banks`).
+
+    `balance` is debited each OPEN position's entry fee at open, but those fees are NOT in the
+    closed-trade journal until the position closes. Passing the live `open_positions` folds their
+    entry fees into `expected` so the residual reflects only genuinely-unexplained money — otherwise
+    every cycle holding an open position shows a spurious `-Σ open entry fee` residual."""
     closed = [d for d in decisions if d.get("realized_pnl") is not None]
     realized_final = sum((d.get("realized_pnl") or 0.0) for d in closed)
     scale_out_banks = sum(bank_total(d) for d in closed)
     entry_fees = sum(entry_fee_for(d, pay_bnb=pay_bnb) for d in closed)
-    expected = seed + realized_final + scale_out_banks - entry_fees
+    open_entry_fees = sum(entry_fee_for(p, pay_bnb=pay_bnb) for p in (open_positions or []))
+    expected = seed + realized_final + scale_out_banks - entry_fees - open_entry_fees
     return {
         "seed": seed,
         "realized_final": realized_final,
         "scale_out_banks": scale_out_banks,
         "entry_fees": entry_fees,
+        "open_entry_fees": open_entry_fees,
         "expected_balance": expected,
         "actual_balance": balance,
         "residual": balance - expected,

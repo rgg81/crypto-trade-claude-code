@@ -54,6 +54,12 @@ def main() -> None:
 
     decisions = read_all_decisions(args.memory)
     balance = json.load(open(os.path.join(args.state, "account.json")))["balance"]
+    # Open positions' entry fees were debited from balance at open but are absent from the
+    # closed-trade journal — fold them in so a book that merely holds positions reconciles clean.
+    try:
+        open_positions = json.load(open(os.path.join(args.state, "positions.json")))
+    except (OSError, ValueError):
+        open_positions = []
     events = report_reduce_events(args.state)
     missing = unrecorded_banks(decisions, events)
 
@@ -67,7 +73,7 @@ def main() -> None:
         decisions = read_all_decisions(args.memory)
         missing = unrecorded_banks(decisions, events)
 
-    rec = reconcile_balance(decisions, balance, seed=args.seed)
+    rec = reconcile_balance(decisions, balance, seed=args.seed, open_positions=open_positions)
     detected = sum((b.get("pnl") or 0.0) for b in missing)
     unexplained = rec["residual"] - detected
 
