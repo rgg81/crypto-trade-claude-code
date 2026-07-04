@@ -42,6 +42,23 @@ def bank_total(decision: dict) -> float:
     return total
 
 
+def open_position_banks(open_positions: list[dict], report_events: list[dict]) -> float:
+    """Reduce/scale-out banks credited to `balance` for CURRENTLY-OPEN positions (a reduced runner
+    that has not fully closed). Its `partial_banks` are NOT yet in the closed-trade journal, so the
+    closed-only `scale_out_banks` sum misses them; sum the report reduce events belonging to each
+    open position (same symbol, cycle >= its `opened_cycle`) so a book holding a reduced runner
+    reconciles clean. They migrate into `scale_out_banks` when the runner finally closes (counted
+    once, never double)."""
+    total = 0.0
+    for p in (open_positions or []):
+        sym = p.get("symbol")
+        oc = p.get("opened_cycle")
+        for ev in report_events:
+            if ev.get("symbol") == sym and (oc is None or (ev.get("cycle") or -1) >= oc):
+                total += ev.get("pnl") or 0.0
+    return total
+
+
 def reconcile_balance(
     decisions: list[dict],
     balance: float,
@@ -49,27 +66,33 @@ def reconcile_balance(
     seed: float = 10000.0,
     pay_bnb: bool = False,
     open_positions: list[dict] | None = None,
+    open_position_banks: float = 0.0,
 ) -> dict:
     """Re-derive the expected account balance and return the full attribution + residual. A non-zero
     residual means the journal does not fully explain balance (e.g. an unrecorded scale-out bank —
     see `unrecorded_banks`).
 
-    `balance` is debited each OPEN position's entry fee at open, but those fees are NOT in the
-    closed-trade journal until the position closes. Passing the live `open_positions` folds their
-    entry fees into `expected` so the residual reflects only genuinely-unexplained money — otherwise
-    every cycle holding an open position shows a spurious `-Σ open entry fee` residual."""
+    `balance` is debited each OPEN position's entry fee at open AND credited any reduce-bank from a
+    still-open reduced runner — neither is in the closed-trade journal until the position closes.
+    Passing the live `open_positions` (entry fees) and `open_position_banks` (runner scale-outs,
+    from `open_position_banks(...)`) folds both into `expected` so the residual reflects only
+    genuinely-unexplained money — otherwise every cycle holding an open position (or a reduced
+    runner) shows a spurious residual and trips the WARNING, eroding its power to flag a REAL
+    divergence."""
     closed = [d for d in decisions if d.get("realized_pnl") is not None]
     realized_final = sum((d.get("realized_pnl") or 0.0) for d in closed)
     scale_out_banks = sum(bank_total(d) for d in closed)
     entry_fees = sum(entry_fee_for(d, pay_bnb=pay_bnb) for d in closed)
     open_entry_fees = sum(entry_fee_for(p, pay_bnb=pay_bnb) for p in (open_positions or []))
-    expected = seed + realized_final + scale_out_banks - entry_fees - open_entry_fees
+    expected = (seed + realized_final + scale_out_banks - entry_fees
+                - open_entry_fees + open_position_banks)
     return {
         "seed": seed,
         "realized_final": realized_final,
         "scale_out_banks": scale_out_banks,
         "entry_fees": entry_fees,
         "open_entry_fees": open_entry_fees,
+        "open_position_banks": open_position_banks,
         "expected_balance": expected,
         "actual_balance": balance,
         "residual": balance - expected,

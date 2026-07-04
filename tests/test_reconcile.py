@@ -11,6 +11,7 @@ from futures_fund.reconcile import (
     bank_total,
     entry_fee_for,
     match_open_decision,
+    open_position_banks,
     reconcile_balance,
     unrecorded_banks,
 )
@@ -96,6 +97,30 @@ def test_entry_fee_for_handles_position_qty_key():
     from_qty = entry_fee_for({"qty": 10.0, "entry": 50.0})
     from_size = entry_fee_for({"size": 10.0, "entry": 50.0})
     assert from_qty == from_size == 10.0 * 50.0 * TAKER_RATE
+
+
+def test_open_position_banks_sums_reduce_events_for_open_symbols():
+    # A reduced-but-still-open runner banked scale-out PnL to balance, but its partial_banks are
+    # NOT yet in the closed journal -> closed-only scale_out_banks misses it. Sum the report reduce
+    # events belonging to the currently-open position (same symbol, cycle >= its opened_cycle).
+    open_positions = [{"symbol": "ADAUSDT", "opened_cycle": 170}]
+    events = [
+        {"symbol": "ADAUSDT", "cycle": 178, "pnl": 21.78},  # this open runner's reduce -> counts
+        {"symbol": "ADAUSDT", "cycle": 150, "pnl": 99.0},  # before opened_cycle (prior ADA) -> out
+        {"symbol": "SOLUSDT", "cycle": 178, "pnl": 50.0},  # other symbol, not open -> excluded
+    ]
+    assert abs(open_position_banks(open_positions, events) - 21.78) < 1e-9
+
+
+def test_reconcile_accounts_for_open_position_reduce_banks():
+    # balance was CREDITED the runner's reduce bank, but the closed-only sum excludes it (runner
+    # still open) -> without accounting, the residual is a spurious +bank (the WARNING we kill).
+    balance = 10000.0 + 21.78  # balance really got credited the open runner's scale-out bank
+    r_blind = reconcile_balance([], balance=balance, seed=10000.0)
+    assert abs(r_blind["residual"] - 21.78) < 1e-9  # spurious +bank residual
+    r = reconcile_balance([], balance=balance, seed=10000.0, open_position_banks=21.78)
+    assert abs(r["open_position_banks"] - 21.78) < 1e-9
+    assert abs(r["residual"]) < 1e-9
 
 
 def test_match_open_decision_interval_containment():

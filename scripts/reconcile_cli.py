@@ -16,7 +16,11 @@ import os
 import re
 
 from futures_fund.journal import append_partial_bank, read_all_decisions
-from futures_fund.reconcile import reconcile_balance, unrecorded_banks
+from futures_fund.reconcile import (
+    open_position_banks,
+    reconcile_balance,
+    unrecorded_banks,
+)
 
 
 def report_reduce_events(state_dir: str) -> list[dict]:
@@ -61,6 +65,10 @@ def main() -> None:
     except (OSError, ValueError):
         open_positions = []
     events = report_reduce_events(args.state)
+    # A still-open reduced runner banked scale-out PnL to balance that is not yet in the closed
+    # journal — fold it back so a book holding a runner reconciles clean (migrates to
+    # scale_out_banks on the runner's final close).
+    open_banks = open_position_banks(open_positions, events)
     missing = unrecorded_banks(decisions, events)
 
     if args.backfill and missing:
@@ -73,7 +81,8 @@ def main() -> None:
         decisions = read_all_decisions(args.memory)
         missing = unrecorded_banks(decisions, events)
 
-    rec = reconcile_balance(decisions, balance, seed=args.seed, open_positions=open_positions)
+    rec = reconcile_balance(decisions, balance, seed=args.seed, open_positions=open_positions,
+                            open_position_banks=open_banks)
     detected = sum((b.get("pnl") or 0.0) for b in missing)
     unexplained = rec["residual"] - detected
 
