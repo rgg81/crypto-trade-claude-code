@@ -653,6 +653,32 @@ def test_gate_refuses_stacked_add_trigger_on_open_same_direction(tmp_path):
     assert any("STACKED-ADD" in a for a in report.get("warnings", []))
 
 
+def test_gate_surfaces_held_symbol_trigger_drop(tmp_path):
+    # check_pending_orders CONSUMES an armed trigger whose symbol is now HELD (no stacking on a live
+    # position) into none of fired/expired/remaining — previously a SILENT drop that vanished with
+    # no counter and made a redundant cancel_triggers on it read triggers_canceled=0 (cy179 BTC
+    # @63050 canceled while BTC long open). The drop is now counted (triggers_dropped_held).
+    from futures_fund.state import Position, save_positions
+    state_dir, memory_dir = tmp_path / "s", tmp_path / "m"
+    ex = FakeExchange({"BTC/USDT:USDT": _uptrend()})
+    last = _pf(state_dir, memory_dir, ex)["briefs"][0]["last_close"]
+    save_positions(state_dir, [Position(
+        symbol="BTCUSDT", direction="long", qty=0.1, entry=last, stop=last - 20.0,
+        take_profits=[last + 999.0], leverage=3.0, margin=10.0, liq_price=last - 50.0,
+        opened_cycle=0, opened_ts=NOW)])
+    # a PRE-EXISTING armed BTC trigger on the now-held symbol (unfired level, won't fire or expire)
+    save_pending_orders(state_dir, [PendingOrder(
+        symbol="BTCUSDT", direction="long", kind="stop_entry", trigger_level=last + 100.0,
+        stop=last + 90.0, take_profits=[last + 200.0], atr=2.0, created_cycle=1, expires_cycle=99)])
+    report = gate_execute_step(ex, _settings(), state_dir, memory_dir, now=NOW, cycle_no=2,
+                               proposals=[], management=[{"symbol": "BTCUSDT", "action": "hold"}],
+                               regime_state=_regime("risk_on"))
+    assert report["triggers_dropped_held"] == 1              # counted, no longer silent
+    assert not any(o.symbol == "BTCUSDT" for o in load_pending_orders(state_dir))  # consumed
+    assert "BTCUSDT" in {p.symbol for p in load_positions(state_dir)}  # open position untouched
+    assert any("HELD-SYMBOL" in a for a in report.get("warnings", []))
+
+
 def test_gate_stack_guard_spares_opposite_direction_hedge(tmp_path):
     # Scope guard: the no-stack veto is SAME-direction only. Holding a BTC long, a BTC SHORT
     # breakdown trigger (a hedge/flip) is a distinct (symbol, direction) key and is NOT refused.

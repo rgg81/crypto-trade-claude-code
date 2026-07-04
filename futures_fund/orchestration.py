@@ -918,6 +918,17 @@ def gate_execute_step(exchange, settings: Settings, state_dir, memory_dir,
             swings_by_symbol[raw] = (float(sh), float(sl))
         except Exception:  # noqa: BLE001 — feed gap -> no swing entry -> fail-safe (Rule 4)
             pass
+    # SURFACE the held-symbol no-stack drop: check_pending_orders CONSUMES any armed trigger whose
+    # symbol is now HELD (a position opened on it — e.g. a re-anchored trigger whose old level hit)
+    # into NONE of fired/expired/remaining, silently. Unlike the stale/noncrypto/wrong-side drops it
+    # was counted/surfaced nowhere, so it vanished with no trace AND a redundant cancel_triggers on
+    # it then read triggers_canceled=0 (cy179 BTC @63050 canceled while BTC long open). Count +
+    # fail-loud it here (behavior unchanged; the drop still happens inside check_pending_orders).
+    held_dropped = [o for o in pending if o.symbol in held_symbols]
+    held_dropped_actions = [
+        f"dropped HELD-SYMBOL {o.direction} {o.kind} {o.symbol} @ {o.trigger_level} — position "
+        f"already open on {o.symbol} (no stacking; the team flips via a holdings CLOSE)"
+        for o in held_dropped]
     fired, expired, remaining = check_pending_orders(state_dir, bars_by_symbol, cycle_no,
                                                      held_symbols=held_symbols,
                                                      oi_change_by_symbol=oi_change_by_symbol)
@@ -1246,6 +1257,10 @@ def gate_execute_step(exchange, settings: Settings, state_dir, memory_dir,
     if stacked_add_actions:                          # surface each (Rule 6): no ADD/scale-in
         report.setdefault("actions", []).extend(stacked_add_actions)
         report.setdefault("warnings", []).extend(stacked_add_actions)
+    report["triggers_dropped_held"] = len(held_dropped)  # armed triggers consumed by held-guard
+    if held_dropped_actions:                         # surface each (Rule 6): was a silent drop
+        report.setdefault("actions", []).extend(held_dropped_actions)
+        report.setdefault("warnings", []).extend(held_dropped_actions)
     report["triggers_expiry_extended"] = triggers_expiry_extended  # reach-floored expiry windows
     report["proposals_rerouted"] = len(_rerouted)    # resting orders misrouted into proposals
     if reroute_actions:                              # surface each (Rule 6, fail-loud)
