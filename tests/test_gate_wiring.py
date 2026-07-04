@@ -622,6 +622,63 @@ def test_gate_reachability_guard_spares_trend_quadrant(tmp_path):
     assert report["triggers_armed"] == 1                 # trend breakdown armed normally
 
 
+def test_gate_refuses_stacked_add_trigger_on_open_same_direction(tmp_path):
+    # CP11 arm-time no-stack guard (cy176 ETH @1752, cy178 BTC @63050): the desk has NO ADD/scale-
+    # in, so a trigger whose (symbol, direction) matches an ALREADY-OPEN position is refused at arm.
+    # This is the phantom add a re-anchored trigger leaves when its OLD level fired-and-opened the
+    # cycle. Refuse-only, never opens; the open position itself is untouched.
+    from futures_fund.state import Position, save_positions
+    state_dir, memory_dir = tmp_path / "s", tmp_path / "m"
+    ex = FakeExchange({"BTC/USDT:USDT": _uptrend()})
+    last = _pf(state_dir, memory_dir, ex)["briefs"][0]["last_close"]
+    save_positions(state_dir, [Position(
+        symbol="BTCUSDT", direction="long", qty=0.1, entry=last, stop=last - 20.0,
+        take_profits=[last + 999.0], leverage=3.0, margin=10.0, liq_price=last - 50.0,
+        opened_cycle=0, opened_ts=NOW)])
+    report = gate_execute_step(
+        ex, _settings(), state_dir, memory_dir, now=NOW, cycle_no=1, proposals=[],
+        management=[{"symbol": "BTCUSDT", "action": "hold"}],   # keep the long open
+        regime_state=_regime("risk_on"),
+        triggers=[
+            # SAME direction as the open BTC long -> phantom ADD -> refused
+            {"symbol": "BTCUSDT", "direction": "long", "kind": "stop_entry",
+             "trigger_level": last + 25.0, "stop": last + 22.0,
+             "take_profits": [last + 40.0], "atr": 2.0},
+        ])
+    assert report["triggers_refused_stacked_add"] == 1
+    assert not any(o.symbol == "BTCUSDT" and o.direction == "long"
+                   for o in load_pending_orders(state_dir))   # phantom add NOT persisted
+    assert report["opened"] == 0                              # refuse-only
+    assert "BTCUSDT" in {p.symbol for p in load_positions(state_dir)}  # open position untouched
+    assert any("STACKED-ADD" in a for a in report.get("warnings", []))
+
+
+def test_gate_stack_guard_spares_opposite_direction_hedge(tmp_path):
+    # Scope guard: the no-stack veto is SAME-direction only. Holding a BTC long, a BTC SHORT
+    # breakdown trigger (a hedge/flip) is a distinct (symbol, direction) key and is NOT refused.
+    from futures_fund.state import Position, save_positions
+    state_dir, memory_dir = tmp_path / "s", tmp_path / "m"
+    ex = FakeExchange({"BTC/USDT:USDT": _uptrend()})
+    last = _pf(state_dir, memory_dir, ex)["briefs"][0]["last_close"]
+    save_positions(state_dir, [Position(
+        symbol="BTCUSDT", direction="long", qty=0.1, entry=last, stop=last - 20.0,
+        take_profits=[last + 999.0], leverage=3.0, margin=10.0, liq_price=last - 50.0,
+        opened_cycle=0, opened_ts=NOW)])
+    report = gate_execute_step(
+        ex, _settings(), state_dir, memory_dir, now=NOW, cycle_no=1, proposals=[],
+        management=[{"symbol": "BTCUSDT", "action": "hold"}],
+        regime_state=_regime("risk_off"),   # with-regime short (no cr-conversion noise)
+        triggers=[
+            # OPPOSITE direction (short) -> a hedge, distinct key -> NOT refused as a stacked add
+            {"symbol": "BTCUSDT", "direction": "short", "kind": "stop_entry",
+             "trigger_level": last - 25.0, "stop": last - 22.0,
+             "take_profits": [last - 40.0], "atr": 2.0},
+        ])
+    assert report["triggers_refused_stacked_add"] == 0
+    assert any(o.symbol == "BTCUSDT" and o.direction == "short"
+               for o in load_pending_orders(state_dir))     # hedge armed normally
+
+
 def test_gate_extends_short_expiry_for_reachable_stop_entry_by_reach(tmp_path):
     # cy152 follow-up to CP10: a reachable but farther stop_entry needs more than the team's 2-cycle
     # (8h) window to travel to AND close through its level. The arm path FLOORS expiry by reach:

@@ -753,6 +753,8 @@ def gate_execute_step(exchange, settings: Settings, state_dir, memory_dir,
     low_rr_actions: list = []
     triggers_refused_unreachable = 0
     unreachable_actions: list = []
+    triggers_refused_stacked_add = 0
+    stacked_add_actions: list = []
     triggers_expiry_extended = 0
 
     def _noncrypto(raw: str) -> bool:  # True iff the gate must REFUSE this symbol (fail-closed)
@@ -1172,6 +1174,27 @@ def gate_execute_step(exchange, settings: Settings, state_dir, memory_dir,
                     f"refused UNREACHABLE arm {o.direction} {o.kind} {o.symbol} @ "
                     f"{o.trigger_level} — {dist:.1f} ATR from mark {mk} in {q}; re-place as a "
                     f"reachable limit_entry fade or a breakdown within ~1 ATR of the floor")
+    # CP11 ARM-TIME no-stack guard: the desk has NO ADD/scale-in, so never arm a trigger whose
+    # (symbol, direction) matches a position that is ALREADY OPEN after this cycle's fires/opens
+    # (execute_proposals persisted them above). A re-anchored trigger whose OLD level FIRED-AND-
+    # OPENED this cycle — fires precede this arm block — would otherwise arm a phantom same-dir
+    # ADD on top of the fresh position (cy176 ETH @1752, cy178 BTC @63050: both re-anchors of an
+    # already-breached trigger that opened, leaving the re-state stacked). Refuse-only, symmetric;
+    # an OPPOSITE-direction trigger (a hedge/flip) is untouched. The team still CANCELS a decayed
+    # trigger via cancel_triggers — this only blocks arming an add the desk cannot express.
+    if new_triggers:
+        from futures_fund.state import load_positions as _load_positions_for_stack
+        _open_keys = {(p.symbol, p.direction) for p in _load_positions_for_stack(state_dir)}
+        kept_ns, stacked = [], []
+        for o in new_triggers:
+            (stacked if (o.symbol, o.direction) in _open_keys else kept_ns).append(o)
+        if stacked:
+            new_triggers = kept_ns
+            triggers_refused_stacked_add += len(stacked)
+            for o in stacked:
+                stacked_add_actions.append(
+                    f"refused STACKED-ADD arm {o.direction} {o.kind} {o.symbol} @ "
+                    f"{o.trigger_level} — {o.direction} position already open (no ADD/scale-in)")
     # ADAPTIVE-EXPIRY floor (cy152 follow-up to CP10): a reachable but FARTHER stop_entry needs more
     # 4h bars to travel to AND close THROUGH its level, so floor its expiry window by reach. The
     # cy139-152 triggers all ran a 2-cycle/8h window — too short even for the reachable ones. Only
@@ -1219,6 +1242,10 @@ def gate_execute_step(exchange, settings: Settings, state_dir, memory_dir,
     if unreachable_actions:                          # surface each (Rule 6): re-place reachable
         report.setdefault("actions", []).extend(unreachable_actions)
         report.setdefault("warnings", []).extend(unreachable_actions)
+    report["triggers_refused_stacked_add"] = triggers_refused_stacked_add  # same-dir add refused
+    if stacked_add_actions:                          # surface each (Rule 6): no ADD/scale-in
+        report.setdefault("actions", []).extend(stacked_add_actions)
+        report.setdefault("warnings", []).extend(stacked_add_actions)
     report["triggers_expiry_extended"] = triggers_expiry_extended  # reach-floored expiry windows
     report["proposals_rerouted"] = len(_rerouted)    # resting orders misrouted into proposals
     if reroute_actions:                              # surface each (Rule 6, fail-loud)
