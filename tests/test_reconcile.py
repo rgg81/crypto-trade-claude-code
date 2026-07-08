@@ -123,6 +123,47 @@ def test_reconcile_accounts_for_open_position_reduce_banks():
     assert abs(r["residual"]) < 1e-9
 
 
+def test_reconcile_open_reduced_runner_uses_original_entry_fee():
+    # A still-open runner was reduced 40%: balance was debited the entry fee on the ORIGINAL qty at
+    # open, but entry_fee_for(runner) prices only the 60% runner -> open_entry_fees under-counts the
+    # reduced 40%'s entry fee, leaving a spurious -0.4*ef residual (the cy198 DOGE -$0.70 case).
+    # Passing the reduce events lets reconcile reconstruct the original qty (current / Π(1-f)).
+    original_qty = 100.0
+    entry = 50.0
+    frac = 0.4
+    runner_qty = original_qty * (1 - frac)  # 60.0
+    ef_original = original_qty * entry * TAKER_RATE  # what balance actually paid at open
+    reduced_ef = original_qty * frac * entry * TAKER_RATE  # the orphaned 40% entry fee
+    open_positions = [
+        {"symbol": "DOGEUSDT", "qty": runner_qty, "entry": entry, "opened_cycle": 194}]
+    events = [{"symbol": "DOGEUSDT", "cycle": 198, "pnl": 21.0, "fraction": frac}]
+    balance = 10000.0 - ef_original  # balance was debited the FULL original entry fee at open
+    # BLIND to the reduce fraction: open_entry_fees prices only the runner -> spurious -reduced_ef
+    r_blind = reconcile_balance([], balance=balance, seed=10000.0, open_positions=open_positions)
+    assert abs(r_blind["residual"] + reduced_ef) < 1e-9
+    # WITH the reduce events: reconstructs original qty -> open_entry_fees = ef_original -> clean
+    r = reconcile_balance([], balance=balance, seed=10000.0, open_positions=open_positions,
+                          report_events=events)
+    assert abs(r["open_entry_fees"] - ef_original) < 1e-9
+    assert abs(r["residual"]) < 1e-9
+
+
+def test_reconcile_open_position_entry_fee_unchanged_without_reduces():
+    # An open position with NO reduce events must price identically with or without report_events
+    # (keep = 1.0 -> original == current) — backward compatibility for the common no-reduce book.
+    open_positions = [{"symbol": "ADAUSDT", "qty": 10.0, "entry": 50.0, "opened_cycle": 170}]
+    ef = 10.0 * 50.0 * TAKER_RATE
+    balance = 10000.0 - ef
+    other_ev = [{"symbol": "SOLUSDT", "cycle": 178, "fraction": 0.5}]
+    r_no_events = reconcile_balance(
+        [], balance=balance, seed=10000.0, open_positions=open_positions)
+    r_events = reconcile_balance(
+        [], balance=balance, seed=10000.0, open_positions=open_positions, report_events=other_ev)
+    assert abs(r_no_events["open_entry_fees"] - ef) < 1e-9
+    assert abs(r_events["open_entry_fees"] - ef) < 1e-9  # other-symbol event does not touch ADA
+    assert abs(r_events["residual"]) < 1e-9
+
+
 def test_match_open_decision_interval_containment():
     decisions = [
         {"id": "a", "symbol": "SOLUSDT", "opened_ts": "2026-06-01T00:00:00Z",

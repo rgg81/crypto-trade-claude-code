@@ -82,7 +82,7 @@ def main() -> None:
         missing = unrecorded_banks(decisions, events)
 
     rec = reconcile_balance(decisions, balance, seed=args.seed, open_positions=open_positions,
-                            open_position_banks=open_banks)
+                            open_position_banks=open_banks, report_events=events)
     detected = sum((b.get("pnl") or 0.0) for b in missing)
     unexplained = rec["residual"] - detected
 

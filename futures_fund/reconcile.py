@@ -42,6 +42,27 @@ def bank_total(decision: dict) -> float:
     return total
 
 
+def original_opened_qty(position: dict, report_events: list[dict] | None = None) -> float:
+    """The position's ORIGINAL opened qty, reconstructed from its current (possibly reduced) qty and
+    the reduce fractions applied to it. balance was debited the entry fee on the ORIGINAL qty at
+    open and a partial reduce does NOT refund it, so pricing the open entry fee off the reduced
+    runner qty under-counts it (the cy198 DOGE -$0.70 residual). Each reduce of fraction f leaves
+    (1-f) of the qty, so original = current / Π(1-f) over the position's own reduce events (same
+    symbol, cycle >= opened_cycle). No events / never-reduced -> keep==1 -> original == current."""
+    cur = position.get("size") or position.get("qty")
+    if not cur:
+        return cur or 0.0
+    sym = position.get("symbol")
+    oc = position.get("opened_cycle")
+    keep = 1.0
+    for ev in (report_events or []):
+        if ev.get("symbol") == sym and (oc is None or (ev.get("cycle") or -1) >= oc):
+            f = ev.get("fraction")
+            if f is not None and 0.0 < f < 1.0:
+                keep *= (1.0 - f)
+    return cur / keep if keep > 0 else cur
+
+
 def open_position_banks(open_positions: list[dict], report_events: list[dict]) -> float:
     """Reduce/scale-out banks credited to `balance` for CURRENTLY-OPEN positions (a reduced runner
     that has not fully closed). Its `partial_banks` are NOT yet in the closed-trade journal, so the
@@ -67,6 +88,7 @@ def reconcile_balance(
     pay_bnb: bool = False,
     open_positions: list[dict] | None = None,
     open_position_banks: float = 0.0,
+    report_events: list[dict] | None = None,
 ) -> dict:
     """Re-derive the expected account balance and return the full attribution + residual. A non-zero
     residual means the journal does not fully explain balance (e.g. an unrecorded scale-out bank —
@@ -83,7 +105,15 @@ def reconcile_balance(
     realized_final = sum((d.get("realized_pnl") or 0.0) for d in closed)
     scale_out_banks = sum(bank_total(d) for d in closed)
     entry_fees = sum(entry_fee_for(d, pay_bnb=pay_bnb) for d in closed)
-    open_entry_fees = sum(entry_fee_for(p, pay_bnb=pay_bnb) for p in (open_positions or []))
+    # Price each open position's entry fee on its ORIGINAL opened qty — balance paid it in full at
+    # open, so a reduced runner priced off its current qty under-counts it (the reduced fraction's
+    # entry fee is orphaned: not in open_entry_fees, not in the closed journal). report_events carry
+    # the reduce fractions used to reconstruct the original qty; absent them we use current qty.
+    open_entry_fees = sum(
+        entry_fee_for({"qty": original_opened_qty(p, report_events), "entry": p.get("entry")},
+                      pay_bnb=pay_bnb)
+        for p in (open_positions or [])
+    )
     expected = (seed + realized_final + scale_out_banks - entry_fees
                 - open_entry_fees + open_position_banks)
     return {
