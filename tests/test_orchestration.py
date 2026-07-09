@@ -86,6 +86,37 @@ def _settings():
     return Settings(account_size_usdt=10_000.0, symbols=["BTC/USDT:USDT"], timeframe="4h")
 
 
+def _post_crush(n=60):
+    """A post-crash name: price ~1.0 but candle ranges ~2.0 -> ATR ~2.0 = ~200% of price
+    (cy203 LAB: ATR 1.772 vs 0.998 price). Structurally un-tradeable: a >=0.6-ATR noise-safe
+    stop forces a negative TP for RR>=2."""
+    rng = np.random.default_rng(11)
+    close = 1.0 + rng.normal(0, 0.02, n)
+    return pd.DataFrame({
+        "timestamp": pd.date_range("2026-01-01", periods=n, freq="4h", tz="UTC"),
+        "open": close, "high": close + 1.0, "low": close - 1.0, "close": close, "volume": 1.0,
+    })
+
+
+class _MultiExchange(FakeExchange):
+    """FakeExchange whose symbol_spec returns each symbol's own raw id, so a multi-symbol
+    preflight briefs distinct raw ids instead of BTCUSDT for everything. Optionally carries a
+    raw->unified map (unified_for_raw) so held positions fold into the universe."""
+    def __init__(self, frames, raw_to_unified=None):
+        super().__init__(frames)
+        self._r2u = raw_to_unified or {}
+
+    def unified_for_raw(self, raw_id):
+        return self._r2u.get(raw_id)
+
+    def symbol_spec(self, symbol):
+        from futures_fund.models import MmrBracket, SymbolSpec
+        raw = symbol.replace("/USDT:USDT", "USDT")
+        return SymbolSpec(symbol=raw, tick_size=0.01, step_size=0.001, min_notional=5.0,
+                          mmr_brackets=[MmrBracket(notional_floor=0, notional_cap=1_000_000,
+                                                   mmr=0.004, maint_amount=0.0, max_leverage=125)])
+
+
 def test_preflight_emits_context_with_briefs(tmp_path):
     ex = FakeExchange({"BTC/USDT:USDT": _uptrend()})
     ctx = preflight_step(ex, _settings(), tmp_path / "s", tmp_path / "m",
@@ -96,6 +127,45 @@ def test_preflight_emits_context_with_briefs(tmp_path):
     assert "BTC/USDT:USDT" in {b["symbol"] for b in ctx["briefs"]}
     assert ctx["briefs"][0]["regime"]  # brief carries the regime
     assert "equity" in ctx and ctx["equity"] > 0
+
+
+def test_preflight_drops_post_crush_untradeable_candidate(tmp_path):
+    # LAB is a post-crush crash artifact (ATR ~2.0 = ~200% of its ~1.0 price): clean stop/TP
+    # geometry is mathematically impossible, so preflight must DROP it from candidate briefs and
+    # surface it in dropped_untradeable (Rule 6 fail-loud). BTC (normal ATR) is kept.
+    ex = _MultiExchange({"BTC/USDT:USDT": _uptrend(), "LAB/USDT:USDT": _post_crush()})
+    settings = Settings(account_size_usdt=10_000.0,
+                        symbols=["BTC/USDT:USDT", "LAB/USDT:USDT"], timeframe="4h")
+    ctx = preflight_step(ex, settings, tmp_path / "s", tmp_path / "m",
+                         now=dt.datetime(2026, 3, 1, tzinfo=UTC), cycle_no=1,
+                         http_client=_HttpClient())
+    briefed = {b["exchange_id"] for b in ctx["briefs"]}
+    assert "BTCUSDT" in briefed          # tradeable name kept
+    assert "LABUSDT" not in briefed      # post-crush candidate dropped
+    dropped = {d["symbol"] for d in ctx.get("dropped_untradeable", [])}
+    assert "LABUSDT" in dropped          # surfaced in the dropped list
+    assert "BTCUSDT" not in dropped
+    lab_drop = next(d for d in ctx["dropped_untradeable"] if d["symbol"] == "LABUSDT")
+    assert lab_drop["atr_price_ratio"] >= 1.0   # carries the diagnostic ratio
+
+
+def test_preflight_keeps_held_post_crush_position(tmp_path):
+    # A HELD position on a post-crush name must NOT be dropped — RM still has to review it
+    # (you are already in the trade). The filter exempts held symbols.
+    from futures_fund.state import Position, save_positions
+    state_dir, memory_dir = tmp_path / "s", tmp_path / "m"
+    held = Position(symbol="LABUSDT", direction="long", qty=1.0, entry=1.0, stop=-1.0,
+                    take_profits=[999.0], leverage=3.0, margin=33.3, liq_price=-10.0,
+                    opened_cycle=0, opened_ts=dt.datetime(2026, 2, 1, tzinfo=UTC))
+    save_positions(state_dir, [held])
+    ex = _MultiExchange({"BTC/USDT:USDT": _uptrend(), "LAB/USDT:USDT": _post_crush()},
+                        {"LABUSDT": "LAB/USDT:USDT"})
+    ctx = preflight_step(ex, _settings(), state_dir, memory_dir,
+                         now=dt.datetime(2026, 3, 1, tzinfo=UTC), cycle_no=2,
+                         http_client=_HttpClient())
+    briefed = {b["exchange_id"] for b in ctx["briefs"]}
+    assert "LABUSDT" in briefed   # held position kept despite post-crush ATR
+    assert "LABUSDT" not in {d["symbol"] for d in ctx.get("dropped_untradeable", [])}
 
 
 class _UnionExchange(FakeExchange):

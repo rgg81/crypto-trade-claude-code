@@ -42,6 +42,32 @@ def working_universe(exchange, settings: Settings, positions) -> Settings:
         else settings
 
 
+_UNTRADEABLE_ATR_PRICE_RATIO = 1.0  # ATR >= price => post-crush crash artifact (cy203 LAB: 1.77x)
+
+
+def atr_price_ratio(brief: dict) -> float | None:
+    """ATR as a fraction of price — a structural-stability gauge. A name whose ATR is on the order
+    of (or larger than) its price is a post-crash artifact: the candle range dwarfs the remaining
+    price (cy203 LAB: ATR 1.772 vs a 0.998 close = 1.77x). Returns None when price/ATR are absent
+    or non-positive (degraded feed) so the caller degrades honestly instead of dividing by zero."""
+    price = brief.get("last_close")
+    atr = brief.get("atr")
+    if not price or not atr or price <= 0:
+        return None
+    return atr / price
+
+
+def is_untradeable_post_crush(brief: dict) -> bool:
+    """A candidate whose ATR is >= its price is structurally un-tradeable this cycle: with ATR that
+    large, a stop can't sit outside the ~0.6-ATR noise band (`_NOISE_BAND_ATR`) while a TP still
+    clears the RR floor — a >=0.6-ATR noise-safe stop forces a NEGATIVE TP for RR>=2. Drop such
+    names so the team doesn't waste an analyst/debate slot on impossible geometry (cy203 LAB was
+    the Watcher's top short at 0.74 yet the Trader had to drop it for exactly this). HELD positions
+    are exempt (handled by the caller) — RM must still review a name you're in."""
+    ratio = atr_price_ratio(brief)
+    return ratio is not None and ratio >= _UNTRADEABLE_ATR_PRICE_RATIO
+
+
 def _regime_panel_briefs(exchange, briefs: list[dict], timeframe: str, now: datetime) -> list[dict]:
     """Briefs for the canonical regime MAJORS absent from this cycle's universe, so the
     deterministic regime (breadth + quorum) is read over the STABLE full panel — NOT just whichever
@@ -217,6 +243,7 @@ def preflight_step(exchange, settings: Settings, state_dir, memory_dir,
     held_by_raw = {p.symbol: p for p in positions}
     decisions_by_id = {d.get("id"): d for d in read_open_decisions(memory_dir)}
     briefs = []
+    dropped_untradeable = []
     for s in settings.symbols:
         b = build_symbol_brief(exchange, s, settings.timeframe, now=now)  # last COMPLETED bar
         b["exchange_id"] = ctx.specs[s].symbol  # raw id (e.g. BTCUSDT) agents MUST use for output
@@ -231,6 +258,16 @@ def preflight_step(exchange, settings: Settings, state_dir, memory_dir,
         if pos is not None:  # carried position -> attach the HOLD/CLOSE review card
             b["holding"] = _holding_card(pos, b, now, settings.timeframe,
                                          decisions_by_id.get(pos.decision_id))
+        # POST-CRUSH FILTER (cy203 LAB): a CANDIDATE whose ATR >= its price is a structural crash
+        # artifact — clean stop/TP geometry is impossible (a noise-safe stop forces a negative TP
+        # for RR>=2). Drop it so the team doesn't waste a slot on un-tradeable geometry. HELD
+        # positions (pos is not None) are NEVER dropped — RM must still review a name you're in.
+        if pos is None and is_untradeable_post_crush(b):
+            dropped_untradeable.append({"symbol": b["exchange_id"],
+                                        "last_close": b.get("last_close"),
+                                        "atr": b.get("atr"),
+                                        "atr_price_ratio": atr_price_ratio(b)})
+            continue
         briefs.append(b)
     # Guarantee the regime is read over the STABLE canonical majors panel (not just the shortlist):
     # append briefs for any canonical major absent from the universe so quorum/breadth see them. It
@@ -254,6 +291,7 @@ def preflight_step(exchange, settings: Settings, state_dir, memory_dir,
         "cycle": cycle_no, "halted": False, "equity": health.equity,
         "drawdown_from_peak": health.drawdown_from_peak, "health_tier": health.tier,
         "briefs": briefs,
+        "dropped_untradeable": dropped_untradeable,
         "open_positions": [{"symbol": p.symbol, "direction": p.direction, "qty": p.qty,
                             "entry": p.entry} for p in positions],
         "audit": {"closed": report["closed"], "carried": report["carried"]},
