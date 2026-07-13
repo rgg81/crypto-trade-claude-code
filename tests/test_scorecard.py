@@ -48,6 +48,51 @@ def test_scorecard_empty_history_is_safe(tmp_path):
     assert sc["equity"] is None and sc["n_closed"] == 0
 
 
+def test_dsr_not_collapsed_by_per_symbol_trade_dispersion(tmp_path):
+    """REGRESSION (cy223 bug): the scorecard fed the DSR a sigma_SR computed from per-SYMBOL
+    per-TRADE Sharpes — a scale incommensurable with the per-CYCLE portfolio Sharpe (a ~22x unit
+    mismatch on live data) — which inflated expected_max_SR and collapsed the DSR p-value to ~0
+    (4e-257), FALSELY reporting 'no edge' on a genuinely positive track record. The DSR must use
+    the canonical single-strategy reduction (sigma_SR = the Sharpe's own standard error) with the
+    fixed num_trials deflation, so a positive-return desk gets a sane p-value, not a degenerate ~0.
+    """
+    from futures_fund.graduation import deflated_sharpe_pvalue
+    from futures_fund.scorecard import returns_series
+
+    state_dir, memory_dir = tmp_path / "s", tmp_path / "m"
+    ensure_memory_layout(memory_dir)
+    # >=11 returns of a gently-rising-but-noisy equity -> a modest positive per-cycle Sharpe.
+    eqs = [10_000, 10_120, 10_060, 10_180, 10_110, 10_250, 10_190, 10_320,
+           10_260, 10_400, 10_330, 10_470, 10_410, 10_550, 10_500, 10_620]
+    for i, eq in enumerate(eqs, start=1):
+        record_equity(state_dir, datetime(2026, 5, 1, tzinfo=UTC) + timedelta(hours=4 * i),
+                      float(eq), cycle=i)
+    # Two symbols whose per-TRADE Sharpes are wildly different: a very-consistent small-winner
+    # (tiny within-symbol std -> huge per-trade Sharpe) and a dispersed mixed stream. Their
+    # cross-symbol sigma_SR is >> the portfolio Sharpe's standard error; fed to the DSR (the bug)
+    # it collapses the p-value. Distinct cycles per trade (identical cycle+symbol+dir is deduped).
+    streams = {"AAAUSDT": [0.020, 0.021, 0.019, 0.020, 0.0205],
+               "BBBUSDT": [0.05, -0.04, 0.03, -0.02, 0.01]}
+    c = 1
+    for sym, stream in streams.items():
+        for r in stream:
+            did = append_decision(memory_dir, {"ts": datetime(2026, 5, 1, tzinfo=UTC), "cycle": c,
+                                               "symbol": sym, "direction": "long",
+                                               "entry": 100.0, "stop": 95.0, "size": 1.0,
+                                               "contributing_agents": ["team"]})
+            patch_outcome(memory_dir, did, {"realized_pnl": r * 100.0, "prediction_correct": r > 0})
+            c += 1
+    sc = build_scorecard(state_dir, memory_dir, monthly_target=0.05)
+    # A clean positive track record must yield a SANE DSR p-value, never a collapsed ~0.
+    assert sc["dsr_pvalue"] > 0.05, (
+        f"DSR collapsed to {sc['dsr_pvalue']:.2e} (per-trade sigma_SR unit mismatch)")
+    # The graduation reason must not read the degenerate 'DSR 0.00'.
+    assert not any("DSR 0.00" in r for r in sc["graduation"]["reasons"])
+    # It must equal the single-strategy (sigma_sr=None) reduction on the same per-cycle returns.
+    rets = returns_series(state_dir)
+    assert sc["dsr_pvalue"] == deflated_sharpe_pvalue(rets, num_trials=10)
+
+
 # ───────────────────── A+B: rebalanced (two-sided) scorecard signals ─────────────────────
 
 def _seed_idle_tradeable(state_dir, memory_dir, *, opened_recent=0, screened=("XLMUSDT",), n=7,
