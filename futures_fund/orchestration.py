@@ -170,6 +170,17 @@ def preflight_step(exchange, settings: Settings, state_dir, memory_dir,
     account = load_account(state_dir, settings.account_size_usdt)
     positions = load_positions(state_dir)
     settings = working_universe(exchange, settings, positions)  # carry held symbols in
+    # Also fold every PENDING-TRIGGER symbol into the universe so each armed trigger gets a FRESH
+    # brief this cycle — symmetric with the gate (execute_proposals folds them to EVALUATE). Without
+    # this, a pending trigger whose symbol isn't in the Watcher's picks (and isn't held) got NO
+    # brief, so the team could neither re-arm it with fresh RR nor retire it deliberately, and it
+    # silently lapsed (cy236: a NEAR long trigger the Watcher flagged as worth keeping expired for
+    # want of a brief). load happens once here; `_pending_raw` also exempts these from the
+    # post-crush candidate drop below (like held) so the team can always SEE a trigger to retire it.
+    from futures_fund.pending_orders import load_pending_orders
+    _pending = load_pending_orders(state_dir)
+    settings = _fold_raw_symbols(exchange, settings, [o.symbol for o in _pending])
+    _pending_raw = {o.symbol for o in _pending}
     report = {"cycle": cycle_no, "halted": False, "opened": 0, "closed": 0,
               "carried": 0, "stuck_close": 0, "equity": account.balance, "actions": []}
     ctx = fetch_context(exchange, settings)
@@ -261,8 +272,10 @@ def preflight_step(exchange, settings: Settings, state_dir, memory_dir,
         # POST-CRUSH FILTER (cy203 LAB): a CANDIDATE whose ATR >= its price is a structural crash
         # artifact — clean stop/TP geometry is impossible (a noise-safe stop forces a negative TP
         # for RR>=2). Drop it so the team doesn't waste a slot on un-tradeable geometry. HELD
-        # positions (pos is not None) are NEVER dropped — RM must still review a name you're in.
-        if pos is None and is_untradeable_post_crush(b):
+        # positions (pos is not None) are NEVER dropped — RM must still review a name you're in. A
+        # symbol with a PENDING TRIGGER is likewise exempt: the team must SEE it to retire it
+        # deliberately (cancel_triggers), just like a held position (Rule 6 fail-loud).
+        if pos is None and b["exchange_id"] not in _pending_raw and is_untradeable_post_crush(b):
             dropped_untradeable.append({"symbol": b["exchange_id"],
                                         "last_close": b.get("last_close"),
                                         "atr": b.get("atr"),

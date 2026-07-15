@@ -168,6 +168,47 @@ def test_preflight_keeps_held_post_crush_position(tmp_path):
     assert "LABUSDT" not in {d["symbol"] for d in ctx.get("dropped_untradeable", [])}
 
 
+def test_preflight_folds_pending_trigger_symbol_into_universe(tmp_path):
+    # A PENDING-TRIGGER symbol must be BRIEFED each cycle even if it is NOT in the Watcher's picks
+    # and not held — so the team can re-arm it with FRESH RR or retire it deliberately, rather than
+    # let it silently lapse for want of data (cy236 NEAR). This is symmetric with the gate, which
+    # already folds pending-trigger symbols (via _fold_raw_symbols) so it can EVALUATE them.
+    from futures_fund.pending_orders import PendingOrder, save_pending_orders
+    state_dir, memory_dir = tmp_path / "s", tmp_path / "m"
+    trig = PendingOrder(symbol="NEARUSDT", direction="long", kind="limit_entry",
+                        trigger_level=2.0, stop=1.9, take_profits=[2.3], atr=0.05,
+                        created_cycle=1, expires_cycle=5)
+    save_pending_orders(state_dir, [trig])
+    # NEAR is neither in _settings() (symbols=[BTC]) nor held; the raw->unified map lets it fold.
+    ex = _MultiExchange({"BTC/USDT:USDT": _uptrend(), "NEAR/USDT:USDT": _uptrend()},
+                        {"NEARUSDT": "NEAR/USDT:USDT"})
+    ctx = preflight_step(ex, _settings(), state_dir, memory_dir,
+                         now=dt.datetime(2026, 3, 1, tzinfo=UTC), cycle_no=2,
+                         http_client=_HttpClient())
+    briefed = {b["exchange_id"] for b in ctx["briefs"]}
+    assert "NEARUSDT" in briefed   # pending-trigger symbol briefed so the team can review/re-arm it
+
+
+def test_preflight_keeps_pending_trigger_on_post_crush_name(tmp_path):
+    # A pending trigger on a post-crush name must NOT be silently dropped from briefs: the team has
+    # to SEE it to retire it deliberately (cancel_triggers), like a held post-crush position is
+    # exempt. So a folded pending-trigger symbol is exempt from the post-crush candidate drop.
+    from futures_fund.pending_orders import PendingOrder, save_pending_orders
+    state_dir, memory_dir = tmp_path / "s", tmp_path / "m"
+    trig = PendingOrder(symbol="LABUSDT", direction="short", kind="stop_entry",
+                        trigger_level=1.0, stop=1.2, take_profits=[0.5], atr=2.0,
+                        created_cycle=1, expires_cycle=5)
+    save_pending_orders(state_dir, [trig])
+    ex = _MultiExchange({"BTC/USDT:USDT": _uptrend(), "LAB/USDT:USDT": _post_crush()},
+                        {"LABUSDT": "LAB/USDT:USDT"})
+    ctx = preflight_step(ex, _settings(), state_dir, memory_dir,
+                         now=dt.datetime(2026, 3, 1, tzinfo=UTC), cycle_no=2,
+                         http_client=_HttpClient())
+    briefed = {b["exchange_id"] for b in ctx["briefs"]}
+    assert "LABUSDT" in briefed   # pending-trigger symbol kept for retire-review (post-crush ATR)
+    assert "LABUSDT" not in {d["symbol"] for d in ctx.get("dropped_untradeable", [])}
+
+
 class _UnionExchange(FakeExchange):
     """FakeExchange that can map a held raw id back to its unified symbol (like ccxt)."""
     def __init__(self, frames, raw_to_unified):
