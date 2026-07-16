@@ -1052,18 +1052,24 @@ def gate_execute_step(exchange, settings: Settings, state_dir, memory_dir,
         fired, remaining = kept_fired, kept_rem
 
     # --- SYMMETRIC counter-regime entry-style gate (replaces the one-sided shorts drop-filter):
-    # a market entry AGAINST the regime read (short while not risk_off, long while risk_off) is
-    # converted to a confirmation stop_entry trigger, never opened at market — identically for both
-    # directions. Permission is never blocked; only entry STYLE (market vs confirm) is conditioned.
-    # EXEMPTION by kind: a fired STOP_ENTRY is itself a confirmed CLOSE-through-level break, so it is
-    # exempt and goes to market. A fired LIMIT_ENTRY is a TOUCH (pullback) fill — NOT a confirmed
-    # break — so a counter-regime limit fill is re-routed through the transform like a fresh proposal
-    # (a with-regime limit fill still fills at market). This closes the unconfirmed-knife-catch path.
+    # a fresh MARKET proposal AGAINST the regime read (short in risk_on, long in risk_off) is
+    # converted to a confirmation stop_entry trigger, never opened at market -- symmetric for
+    # both directions. Permission is never blocked; only entry STYLE (market vs confirm) is gated.
+    # EXEMPTION by kind -- BOTH conditional fills are SELF-CONFIRMING, so both go to market:
+    #   * a fired STOP_ENTRY is a confirmed CLOSE-through-level break;
+    #   * a fired LIMIT_ENTRY is a TOUCH fill at a TRADER-CHOSEN level -- the pre-placed limit IS
+    #     the mean-reversion FADE entry the trader designed, and its tight stop bounds the knife-
+    #     catch risk. Re-routing a counter-regime limit fade through the breakdown-confirmation
+    #     transform INVERTED it (short-the-bounce-to-X -> short-a-close-below-X) and dropped it in
+    #     the fade's SUCCESS case -- the sharp rejection put price past the confirmation before it
+    #     could arm (cy238 wrong-side, cy242 refused-unreachable; lessons be02821c / 031933ec). So
+    #     a counter-regime limit fill now fills at its level, identically to a with-regime one.
+    # Only FRESH market proposals still pass through the counter-regime confirmation transform.
     stop_fired = [] if halted else [fired_to_proposal(o) for o in fired if o.kind == "stop_entry"]
     touch_fired = [] if halted else [fired_to_proposal(o) for o in fired if o.kind != "stop_entry"]
-    to_confirm = ([] if halted else list(proposals)) + touch_fired
+    to_confirm = [] if halted else list(proposals)
     market_fresh, cr_armed = _apply_counter_regime_confirmation(to_confirm, regime_state, cycle_no)
-    proposals = market_fresh + stop_fired
+    proposals = market_fresh + stop_fired + touch_fired
     fired_props = stop_fired + touch_fired  # all fires, for telemetry (triggers_fired counts both)
 
     # Validate/convert each proposal INDEPENDENTLY: one malformed proposal (bad schema, inverted

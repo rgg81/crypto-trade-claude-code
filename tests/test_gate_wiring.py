@@ -156,20 +156,28 @@ def test_gate_missing_context_sentinel_fails_closed(tmp_path):
     assert report["opened"] == 0 and report["counter_regime_triggered"] == 1
 
 
-def test_gate_reconfirms_counter_regime_limit_fill(tmp_path):
-    # FIX #2: a counter-regime LIMIT_ENTRY fill (a TOUCH, not a confirmed break) is re-routed through
-    # confirmation, not opened at market. The short fired on the up-touch but risk_on makes it
-    # counter-regime -> converted to a stop_entry, not a naked market short.
+def test_gate_counter_regime_limit_fade_fills_at_market(tmp_path):
+    # cy238/cy242 fix (lessons be02821c / 031933ec): a counter-regime LIMIT_ENTRY FADE is SELF-
+    # CONFIRMING -- the pre-placed limit at a trader-chosen level IS the intended mean-reversion
+    # entry, and its tight stop bounds the knife-catch risk the old re-routing was guarding. It must
+    # FILL at its level, NOT be re-routed to a breakdown-confirmation stop_entry. The old re-routing
+    # INVERTED the fade (short-the-bounce-to-X became short-a-close-below-X) and stranded/dropped it
+    # exactly in the fade's SUCCESS case (a sharp rejection put price past the confirmation level
+    # before it could arm -> refused unreachable). A fresh counter-regime MARKET proposal still
+    # confirms (see test_gate_converts_counter_regime_short_to_trigger) -- only the limit FILL is
+    # exempted, symmetric with the already-exempt fired stop_entry.
     state_dir, memory_dir = tmp_path / "s", tmp_path / "m"
     ex = FakeExchange({"BTC/USDT:USDT": _uptrend()})
     last = _pf(state_dir, memory_dir, ex)["briefs"][0]["last_close"]
     save_pending_orders(state_dir, [PendingOrder(
         symbol="BTCUSDT", direction="short", kind="limit_entry", trigger_level=last,
-        stop=last + 5.0, take_profits=[last - 10.0], atr=2.0, created_cycle=0, expires_cycle=9)])
+        stop=last + 4.0, take_profits=[last - 12.0], atr=2.0, created_cycle=0, expires_cycle=9)])
     report = gate_execute_step(ex, _settings(), state_dir, memory_dir, now=NOW, cycle_no=1,
                                proposals=[], regime_state=_regime("risk_on"))
-    assert report["triggers_fired"] == 1                                   # it DID fire (touch)
-    assert report["opened"] == 0 and report["counter_regime_triggered"] == 1  # but got re-confirmed
+    assert report["triggers_fired"] == 1              # it fired (up-touch fill)
+    assert report["opened"] == 1                      # and OPENED at its level (the fade entry)
+    assert report["counter_regime_triggered"] == 0    # NOT re-routed to a confirmation stop_entry
+    assert len(load_positions(state_dir)) == 1        # a real short fade position exists
 
 
 def test_gate_counter_regime_trigger_not_clobbered_by_trader_trigger(tmp_path):
