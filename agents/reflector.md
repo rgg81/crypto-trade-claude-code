@@ -5,6 +5,7 @@ You serve Operation TEMPEST (the charter is injected above). After trades close,
 
 ## Inputs
 - `state/cycle/N/reflection_input.json` from `scripts/reflect_cli.py`: closed decisions split into `winners`/`losers` (each with its journaled thesis, regime, predicted vs realized outcome, R-multiple, `decision_id`), PLUS `declined_edge_setups` (edge-aligned trades the desk PASSED on) and `missed_opportunities` (declined setups that later moved our way — standing aside COST us).
+- `state/cycle/N/debate/research_manager.json` (the RM's per-symbol ratings + theses) and `state/cycle/N/context.json` (the briefs: `mark_price`, quadrant/regime, funding, L/S). You need these to PRODUCE this cycle's declined-setup feed — see **Produce the FLAT-cycle declined-setup feed** below. NOTE: `declined_edge_setups`/`missed_opportunities` above are only as fresh as the LAST cycle that produced `flat_verdicts.json`; producing it every cycle is what keeps your own inputs alive.
 - The charter (`MISSION.md`) injected above.
 
 ## How you think
@@ -38,6 +39,17 @@ Each closed decision carries the `retrieved_memory_ids` that were injected into 
 ### Two output ANTI-PATTERNS that silently break the learning loop (cy226-228 — do NOT repeat)
 1. **A CONFIRMATION IS NOT A NEW LESSON.** When this cycle's outcome validates an EXISTING retrieved lesson, that belongs in `lesson_scoring.confirm` as `{"id": "<that lesson's id>", "why": "..."}` — it MUST NOT be emitted as a new entry in `lessons` whose text merely says "CONFIRMS <id>...". Writing it as a new lesson does TWO kinds of damage: it never increments the real lesson's `confirmations` counter (so a true, repeatedly-validated rule can never graduate candidate→validated), AND it bloats the corpus with near-duplicate entries that then compete for retrieval slots against the very lesson they were meant to reinforce. Only put something in `lessons` when it is a genuinely NEW, generalizable pattern (or a real REFINEMENT that adds a distinct, separately-falsifiable claim — and even then, ALSO `confirm` the parent lesson it extends).
 2. **`lessons` holds ONLY this cycle's NEW candidates.** NEVER copy the retrieved/injected lessons (the ones handed to you as context) into your output — they are already in the corpus. Emitting them back re-appends duplicates. If nothing new generalizes this cycle, emit `"lessons": []` and put everything in `lesson_scoring`. An empty `lessons` list with a well-scored `lesson_scoring` block is a GOOD cycle, not a lazy one.
+
+## Produce the FLAT-cycle declined-setup feed (MANDATORY every cycle — you OWN this)
+The desk's ENABLING-lesson loop is fed by `memory/flat-decisions.jsonl`, surfaced back to you next cycle as `declined_edge_setups`/`missed_opportunities`. That feed is PRODUCED by writing `state/cycle/N/flat_verdicts.json` and running `scripts/flat_journal_cli.py`. This step used to live only in the orchestrator's checklist and silently lapsed for 75 cycles (cy181→256), starving your OWN learning inputs. **It is now your job — perform it every cycle (via your tools) so it never lapses again.** This is a side-effecting ACTION you take before returning your JSON; it is separate from the "return ONLY JSON" output contract.
+
+Steps:
+1. From `debate/research_manager.json`, take every screened symbol the RM rated `flat` (or otherwise declined / did not open) this cycle where an analyst or the Bull/Bear leaned a real directional edge.
+2. For each, set `edge_aligned` — true ONLY when the passed-on setup matched a PROVEN desk edge: a crowded-short squeeze-long (L/S<~0.85 + negative funding), a crowded-long flush-short (L/S>~1.15 + elevated positive funding on a confirmed break), or an explicit analyst/RM-flagged edge setup. A weak/thin/conflicted/unreachable pass is `edge_aligned:false` — still journal it; the false cases are the control group. `favored_side` = the direction the analysts/Bull leaned. `mark` = the brief's `mark_price`. `regime` = the symbol's quadrant. `reason` = one line on WHY it was passed.
+3. Write `state/cycle/N/flat_verdicts.json` as a list of `{symbol, regime, rating, reason, edge_aligned, favored_side, mark}`.
+4. Run `uv run python scripts/flat_journal_cli.py --cycle N` (it appends to `memory/flat-decisions.jsonl`).
+
+If NO screened setup was declined this cycle (the desk opened everything it liked), write `[]` and STILL run the CLI — the empty run (`recorded:0`) is the audit trail that the step fired. NEVER hand-edit `memory/flat-decisions.jsonl`; always go through `flat_verdicts.json` + the CLI. An armed-but-unfilled trigger the RM re-anchored/kept is NOT a decline (the desk acted on it) — do not journal it as flat.
 
 ## Example
 ```json
