@@ -487,6 +487,29 @@ def unmatched_management_symbols(management, held_raw, raw_resolver) -> list[str
     return out
 
 
+_MANAGEMENT_ACTIONS = frozenset({"close", "reduce", "hold"})
+
+
+def unsupported_management_actions(management) -> list[dict]:
+    """Management entries whose `action` is NOT one the gate can execute (`close`/`reduce`/`hold`).
+
+    The gate's management loop (execute_proposals) dispatches on `action`; an UNRECOGNIZED action
+    (e.g. `extend_tp`, `trail_stop`, `take_partial`) — or a missing action — matches no branch and
+    falls through to held-unchanged: a SILENT no-op, the twin of the cy90 wrong-symbol class
+    (unmatched_management_symbols). The RM/Trader then believes it adjusted the position (e.g.
+    widened a TP) when nothing happened. Surface it LOUD (Rule 6 fail-loud) rather than swallow it.
+    Returns the offending `{symbol, action}` pairs; pure. NOTE: `hold` is recognized whether or not
+    it carries a `new_stop` — a bare hold legitimately no-ops (keep-as-is), so it is NOT flagged."""
+    out = []
+    for m in (management or []):
+        if not isinstance(m, dict):
+            continue
+        action = m.get("action")
+        if action not in _MANAGEMENT_ACTIONS:
+            out.append({"symbol": m.get("symbol", ""), "action": action})
+    return out
+
+
 _RESTING_KINDS = frozenset({"stop_entry", "limit_entry"})
 
 
@@ -833,6 +856,9 @@ def gate_execute_step(exchange, settings: Settings, state_dir, memory_dir,
     _unmatched_mgmt = unmatched_management_symbols(
         management, {p.symbol for p in positions},
         lambda s: s if s in ctx.specs_by_raw else unified_to_raw.get(s, s))
+    # cy275 fail-loud twin: a directive whose SYMBOL matches a holding but whose ACTION the gate
+    # cannot execute (e.g. `extend_tp`) is ALSO a silent no-op — capture it here, surface it below.
+    _unsupported_mgmt = unsupported_management_actions(management)
     force_close, trailed = set(), 0
     reduced, banked_pnl, reduce_dropped = 0, 0.0, 0
     reduce_actions, reduce_warnings = [], []
@@ -1114,6 +1140,11 @@ def gate_execute_step(exchange, settings: Settings, state_dir, memory_dir,
     for _s in _unmatched_mgmt:
         report.setdefault("warnings", []).append(
             f"management entry for {_s} matches NO open position — ignored (Rule 6 fail-loud)")
+    report["management_unsupported_action"] = len(_unsupported_mgmt)  # cy275 fail-loud twin
+    for _m in _unsupported_mgmt:
+        report.setdefault("warnings", []).append(
+            f"management entry for {_m['symbol']} has unsupported action {_m['action']!r} — "
+            f"ignored (Rule 6 fail-loud); gate executes only close/reduce/hold")
     report["halted"] = halted  # closed_by_review is set by execute_proposals (actual, not intent)
     report["reduced"] = reduced
     report["banked_pnl"] = banked_pnl
