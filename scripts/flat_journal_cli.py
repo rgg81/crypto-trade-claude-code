@@ -17,7 +17,7 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 
-from futures_fund.flat_journal import append_flat_decision, coerce_flat_verdicts
+from futures_fund.flat_journal import coerce_flat_verdicts, record_flat_decisions
 
 
 def main() -> None:
@@ -30,9 +30,9 @@ def main() -> None:
         return
     verdicts = coerce_flat_verdicts(json.loads(p.read_text()))
     now = datetime.now(UTC)
-    ids = []
-    for v in verdicts:
-        ids.append(append_flat_decision("memory", {**v, "cycle": args.cycle}, ts=now))
+    # idempotent-per-cycle: a corrective re-run REPLACES this cycle's unevaluated rows (never
+    # double-counts), so the Reflector can safely re-emit after a labeling fix.
+    ids = record_flat_decisions("memory", args.cycle, verdicts, ts=now)
     print(json.dumps({"recorded": len(ids), "edge_aligned":
                       sum(1 for v in verdicts if v.get("edge_aligned"))}))
 

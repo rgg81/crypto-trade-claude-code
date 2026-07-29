@@ -8,6 +8,7 @@ from futures_fund.flat_journal import (
     coerce_flat_verdicts,
     evaluate_pending_flats,
     read_flat_decisions,
+    record_flat_decisions,
 )
 
 
@@ -130,6 +131,37 @@ def test_short_horizon_bounce_no_longer_locks_verdict(tmp_path):
                            now_cycle=15, eval_after_cycles=6)   # trend down 15% -> cost us
     r = read_flat_decisions(tmp_path)[0]
     assert r["evaluated"] is True and r["flat_cost_us"] is True
+
+
+# --- idempotent-per-cycle producer (fix: a corrective re-run must not double-count the cycle) -----
+def test_record_flat_decisions_replaces_same_cycle_not_duplicate(tmp_path):
+    ts = datetime(2026, 5, 31, tzinfo=UTC)
+    # first producer run for cycle 9 (NEAR mis-labeled edge_aligned=True)
+    ids1 = record_flat_decisions(tmp_path, 9, [_flat("NEARUSDT", edge=True),
+                                               _flat("XRPUSDT", edge=True)], ts=ts)
+    assert len(ids1) == 2 and len(read_flat_decisions(tmp_path)) == 2
+    # a CORRECTIVE re-run for the SAME cycle (NEAR re-labeled edge=False) must REPLACE, not append
+    record_flat_decisions(tmp_path, 9, [_flat("NEARUSDT", edge=False),
+                                        _flat("XRPUSDT", edge=True)], ts=ts)
+    rows = read_flat_decisions(tmp_path)
+    assert len(rows) == 2  # no double-count
+    near = next(r for r in rows if r["symbol"] == "NEARUSDT")
+    assert near["edge_aligned"] is False  # correction applied
+    assert all(r["cycle"] == 9 and r["evaluated"] is False for r in rows)
+
+
+def test_record_flat_decisions_preserves_other_cycles_and_evaluated_rows(tmp_path):
+    ts = datetime(2026, 5, 31, tzinfo=UTC)
+    # a PRIOR cycle's record, already outcome-evaluated — must never be wiped by a later re-run
+    append_flat_decision(tmp_path, {**_flat("SOLUSDT", side="short", mark=100.0, cycle=8),
+                                    "evaluated": True, "flat_cost_us": True}, ts=ts)
+    record_flat_decisions(tmp_path, 9, [_flat("XRPUSDT")], ts=ts)
+    # re-run cycle 9 with a different set — cycle 8's evaluated row stays intact
+    record_flat_decisions(tmp_path, 9, [_flat("XRPUSDT"), _flat("UNIUSDT")], ts=ts)
+    rows = read_flat_decisions(tmp_path)
+    assert sorted(r["symbol"] for r in rows) == ["SOLUSDT", "UNIUSDT", "XRPUSDT"]
+    sol = next(r for r in rows if r["symbol"] == "SOLUSDT")
+    assert sol["cycle"] == 8 and sol["evaluated"] is True and sol["flat_cost_us"] is True
 
 
 def test_overdue_unrepriceable_flat_finalizes_instead_of_replaying(tmp_path):

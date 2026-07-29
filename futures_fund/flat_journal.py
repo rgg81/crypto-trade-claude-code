@@ -62,6 +62,29 @@ def _write_all(memory_dir, rows: list[dict]) -> None:
     _store(memory_dir).write_text("".join(json.dumps(r, default=str) + "\n" for r in rows))
 
 
+def record_flat_decisions(memory_dir, cycle: int, verdicts: list[dict], ts: datetime) -> list[str]:
+    """Idempotently persist THIS cycle's declined-setup verdicts (batch entry point for the CLI).
+
+    The Reflector produces flat_verdicts.json once per cycle, but a correction (e.g. re-labeling
+    edge_aligned after a calc-vigilance flag) means re-running the producer for the SAME cycle.
+    append_flat_decision blindly appends, so a naive re-run would DOUBLE-COUNT the cycle's flats,
+    polluting the declined-edge feed the Reflector learns from. This replaces the cycle's own
+    UNEVALUATED prior rows before appending the fresh set: rows from OTHER cycles and any already
+    outcome-patched (evaluated) rows are preserved untouched, so a re-run is safe and idempotent."""
+    kept = [r for r in read_flat_decisions(memory_dir)
+            if not (r.get("cycle") == cycle and not r.get("evaluated", False))]
+    stamp = ts.isoformat() if hasattr(ts, "isoformat") else ts
+    ids: list[str] = []
+    for v in verdicts:
+        row = {**v, "cycle": cycle, "ts": stamp}
+        row.setdefault("id", uuid.uuid4().hex)
+        row.setdefault("evaluated", False)
+        kept.append(row)
+        ids.append(row["id"])
+    _write_all(memory_dir, kept)
+    return ids
+
+
 def patch_flat_outcome(memory_dir, fid: str, fields: dict) -> bool:
     rows = read_flat_decisions(memory_dir)
     hit = False
