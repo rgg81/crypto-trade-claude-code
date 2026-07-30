@@ -55,6 +55,25 @@ def test_market_context_assembles_all_feeds():
     assert mc["warnings"] == []
 
 
+def test_market_context_warns_when_social_engagement_is_uniformly_zero():
+    """cy309/cy310: reddit returned 25 posts whose `score` and `num_comments` were identically 0
+    for 11+ cycles, so engagement carried no signal — but `warnings` stayed EMPTY because the
+    detector only fired on ZERO POSTS. The Sentiment analyst had to notice empirically and cap its
+    own conviction. Posts-present-but-dead-engagement is a degraded feed and must say so."""
+    from futures_fund.market_context import social_engagement_degraded
+    live = {"posts": [{"title": "a", "score": 12, "num_comments": 3},
+                      {"title": "b", "score": 0, "num_comments": 0}]}
+    assert social_engagement_degraded(live) is False        # some real engagement -> fine
+    dead = {"posts": [{"title": "a", "score": 0, "num_comments": 0},
+                      {"title": "b", "score": 0, "num_comments": 0}]}
+    assert social_engagement_degraded(dead) is True         # uniformly zero -> degraded
+    # no posts: the pre-existing no-posts warning already owns that case
+    assert social_engagement_degraded({"posts": []}) is False
+    assert social_engagement_degraded({}) is False
+    # missing keys must not crash or false-positive
+    assert social_engagement_degraded({"posts": [{"title": "a"}]}) is False
+
+
 def test_market_context_degrades_without_fred_key():
     mc = build_market_context(_Client(), _settings(), fred_key=None)
     assert mc["macro"] == {}
