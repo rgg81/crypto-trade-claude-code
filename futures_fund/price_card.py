@@ -20,6 +20,9 @@ _CARD_FIELDS = (
     "adx", "plus_di", "minus_di", "rsi", "ema20_slope", "ema50_slope",
     "regime", "trend_direction",
     "funding_payer", "funding_annualized_pct", "funding_rate",
+    # baseline-relative carry read (cy309): payer/annualized alone label the 10.95%/yr
+    # zero-information baseline as "longs pay" — surface the premium classification too.
+    "funding_premium", "funding_vs_baseline",
     "long_short_ratio", "long_account", "oi_change",
 )
 

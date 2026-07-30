@@ -9,6 +9,44 @@ _TF_SECONDS = {"15m": 900, "1h": 3600, "4h": 14400, "1d": 86400}
 OI_REACTIVE_LOOKBACK = 4   # completed 4h bars back (~16h) for the trigger OI-gate's reactive window
 
 
+# Binance's funding formula is F = premium + clamp(interest - premium, ±0.05%), with a default
+# interest component of 0.01% per 8h (pro-rated to the symbol's own interval). A perp whose basis
+# sits anywhere inside that clamp therefore prints EXACTLY the interest rate. Annualized, that
+# zero-information point is interval-INVARIANT: 0.01% x 3 x 365 = 10.95%/yr.
+FUNDING_INTEREST_PER_8H = 0.0001
+FUNDING_BASELINE_ANNUAL_PCT = FUNDING_INTEREST_PER_8H * 3.0 * 365.0 * 100.0  # 10.95
+
+
+def funding_premium(annualized_pct: float | None, *,
+                    baseline_pct: float = FUNDING_BASELINE_ANNUAL_PCT,
+                    tol_pct: float = 0.05) -> tuple[str, float | None]:
+    """Classify funding RELATIVE TO the baseline — the read `funding_payer` cannot give.
+
+    `funding_payer == "longs"` is true for ANY rate > 0, so the desk spent cycles reading the
+    BASELINE ITSELF as "trapped longs bleeding carry" (cy309: HYPE printed +10.95%/yr = exactly
+    baseline and was called 'flush fuel restored'; BNB's +7.06% was called 'the cleanest carry on
+    the board' while actually sitting at a 64.5%-of-baseline DISCOUNT). Only the distance from
+    baseline carries information:
+      - "premium"  (> baseline): longs really are paying up — the only genuine
+        flush-short carry leg.
+      - "discount" (< baseline): the perp trades below spot = net short pressure, even when
+        `funding_payer` still says "longs".
+      - "at_par"   (≈ baseline): INDETERMINATE, not "zero premium" — the clamp pins F at the
+        interest rate across the whole band where the basis is within ~5bp of it, so an at-par
+        print says nothing about crowding either way. Never score it as carry fuel.
+    Returns (state, ratio_to_baseline); ("unknown", None) on missing/degraded input."""
+    try:
+        if annualized_pct is None or not math.isfinite(float(annualized_pct)) or not baseline_pct:
+            return ("unknown", None)
+        annual = float(annualized_pct)
+        ratio = annual / baseline_pct
+        if abs(annual - baseline_pct) <= tol_pct:
+            return ("at_par", ratio)
+        return ("premium" if annual > baseline_pct else "discount", ratio)
+    except Exception:  # noqa: BLE001 — never break the brief over funding housekeeping
+        return ("unknown", None)
+
+
 def funding_direction(rate: float, interval_hours: float) -> tuple[str, float]:
     """Resolve a raw funding rate into an UNAMBIGUOUS (payer, annualized_pct) pair so agents never
     have to interpret the sign — the cy78 trap, where two analysts inverted it and called a TRX
@@ -181,6 +219,13 @@ def build_symbol_brief(exchange, symbol: str, timeframe: str = "4h",
                                            float(funding.interval_hours))[0],
         "funding_annualized_pct": funding_direction(float(funding.current_rate),
                                                     float(funding.interval_hours))[1],
+        # Baseline-RELATIVE read (cy309): `funding_payer` is a pure sign test, so it labels the
+        # zero-information baseline as "longs pay". Agents must score carry off these instead.
+        "funding_baseline_pct": FUNDING_BASELINE_ANNUAL_PCT,
+        "funding_premium": funding_premium(funding_direction(
+            float(funding.current_rate), float(funding.interval_hours))[1])[0],
+        "funding_vs_baseline": funding_premium(funding_direction(
+            float(funding.current_rate), float(funding.interval_hours))[1])[1],
         "mark_price": float(funding.mark_price),
         **_derivatives(exchange, symbol, timeframe, now=now),
     }

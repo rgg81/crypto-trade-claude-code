@@ -76,6 +76,42 @@ def test_funding_direction_helper_is_unambiguous():
     assert payer == "shorts"          # a SHORT pays; a LONG receives — never the inverse
 
 
+def test_funding_premium_classifies_relative_to_the_zero_premium_baseline():
+    """cy309: `funding_payer == 'longs'` is true for ANY rate > 0, so the desk read the Binance
+    baseline itself as 'longs bleeding carry'. Funding = premium + clamp(interest - premium, ±5bp),
+    so a perp whose basis sits inside the clamp prints EXACTLY the interest rate (0.01%/8h =
+    10.95%/yr) with payer='longs'. At par is therefore INDETERMINATE, not zero-premium; only
+    above/below baseline carry information."""
+    from futures_fund.brief import (
+        FUNDING_BASELINE_ANNUAL_PCT,
+        funding_premium,
+    )
+    assert FUNDING_BASELINE_ANNUAL_PCT == pytest.approx(10.95, abs=0.01)
+    # exactly at baseline -> at_par (INDETERMINATE), NOT a carry edge
+    state, ratio = funding_premium(10.95)
+    assert state == "at_par" and ratio == pytest.approx(1.0, abs=0.01)
+    # below baseline but still payer='longs' -> a genuine perp DISCOUNT, not longs paying up
+    state, ratio = funding_premium(7.06)          # cy309 BNB
+    assert state == "discount" and ratio == pytest.approx(0.645, abs=0.005)
+    state, _ = funding_premium(1.07)              # cy309 SUI
+    assert state == "discount"
+    # genuinely elevated -> a real premium (the only case that is flush-short carry fuel)
+    state, ratio = funding_premium(46.1)          # the LAB case: ~4.2x baseline
+    assert state == "premium" and ratio == pytest.approx(4.21, abs=0.02)
+    # negative funding is a discount too (shorts pay)
+    assert funding_premium(-11.12)[0] == "discount"
+    # degrade safely
+    assert funding_premium(None) == ("unknown", None)
+
+
+def test_brief_carries_funding_premium_fields():
+    # the baseline-relative read must reach the agents, not just the raw sign
+    b = build_symbol_brief(FakeExchange(_uptrend(), funding_rate=0.0001), "BTC/USDT:USDT")
+    assert b["funding_baseline_pct"] == pytest.approx(10.95, abs=0.01)
+    assert b["funding_premium"] == "at_par"        # the default rate IS the baseline
+    assert b["funding_vs_baseline"] == pytest.approx(1.0, abs=0.01)
+
+
 def test_brief_carries_explicit_funding_payer_and_annualized():
     # positive funding (FakeExchange default +0.0001) => longs pay shorts
     b = build_symbol_brief(FakeExchange(_uptrend(), funding_rate=0.0001), "BTC/USDT:USDT")
