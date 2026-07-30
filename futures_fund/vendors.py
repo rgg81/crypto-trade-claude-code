@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import functools
 import html
 import json
 import re
@@ -65,14 +66,51 @@ def _base(symbol: str) -> str:
     return s[:-4] if s.endswith("USDT") else s
 
 
+@functools.lru_cache(maxsize=4096)
+def _kw_re(keyword: str, *, cased: bool) -> re.Pattern[str]:
+    """Word-boundary matcher for one ticker/alias. Cached — tagging runs per headline per symbol.
+
+    Boundaries are `\\w`-based rather than `\\b` so a `$TICKER` cashtag still matches while
+    `SUIt` / `UNIversity` / `l-ON-g` do not. `cased=True` compiles a case-SENSITIVE pattern."""
+    return re.compile(rf"(?<!\w){re.escape(keyword)}(?!\w)", 0 if cased else re.IGNORECASE)
+
+
+# Tickers that collide with an ordinary English word. For these a lowercase prose hit is almost
+# always a false positive ("live on Starknet", "near the highs", "the bank said"), so they demand
+# an unambiguous crypto signal — a $cashtag or a standalone UPPERCASE ticker, which is how
+# headlines and social posts actually write them ("ON rallies 74%", "$BANK unlock"). Full-name
+# aliases ("orochi network") are unaffected and still match case-insensitively.
+_WORDLIKE_TICKERS = frozenset({
+    "ON", "IN", "IT", "AT", "IS", "BE", "GO", "ME", "MY", "SO", "UP", "US", "OR", "AN", "AS",
+    "BY", "DO", "IF", "NO", "OF", "TO", "WE", "HE", "ALL", "ANY", "ARE", "FOR", "NEW", "ONE",
+    "OUT", "OWN", "TOP", "TWO", "WIN", "YOU", "AND", "THE", "NOT", "CAN", "HAS", "HAD", "WAS",
+    "GET", "SEE", "WHO", "WHY", "HOW", "NOW", "LOW", "BIG", "BUY", "PAY", "RUN", "SET", "SUN",
+    "AIR", "ACT", "AGE", "ART", "BAR", "BET", "BIT", "BOX", "GAS", "NEAR", "BANK", "LIVE",
+    "REAL", "MOVE", "CORE", "EDGE", "FLOW", "CASH", "FUND", "HOME", "IDEA", "LOOK", "MOON",
+    "NEXT", "BEST", "TIME", "LIKE", "JUST", "MORE", "OVER", "BEAT", "RARE", "SAFE", "HOPE",
+})
+
+
 def tag_instruments(title: str, symbols: list[str]) -> list[str]:
-    """Which of `symbols` (bases or unified) a headline mentions, by ticker or full name."""
-    t = title.lower()
+    """Which of `symbols` (bases or unified) a headline mentions, by ticker or full name.
+
+    Matched on WORD BOUNDARIES, never as a raw substring, and English-word tickers additionally
+    require a cashtag/uppercase form. A substring match tags every English word CONTAINING the
+    ticker, and a bare word-boundary match still tags the word ITSELF (cy307 — base `ON`/Orochi
+    Network was tagged on "live ON Starknet", "banks ON public blockchains", "l-ON-g", "L-ON-don",
+    producing 22 phantom social mentions and 10 mis-tagged headlines that polluted the News
+    `instruments` and Sentiment `mentions` feeds for multiple cycles until two analysts
+    independently flagged it)."""
     out: list[str] = []
     for sym in symbols:
         b = _base(sym)
-        kws = (b.lower(),) + _ALIASES.get(b, ())
-        if any(k in t for k in kws) and b not in out:
+        aliases = _ALIASES.get(b, ())
+        cased = b.upper() in _WORDLIKE_TICKERS
+        # the bare ticker: case-sensitive for word-like tickers; aliases always case-insensitive
+        hit = _kw_re(b.upper() if cased else b.lower(), cased=cased).search(title)
+        if not hit:
+            hit = any(_kw_re(a, cased=False).search(title) for a in aliases)
+        if hit and b not in out:
             out.append(b)
     return out
 

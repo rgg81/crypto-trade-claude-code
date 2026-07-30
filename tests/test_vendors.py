@@ -29,6 +29,24 @@ def test_tag_instruments_matches_base_and_alias():
     assert tag_instruments("Regulators weigh stablecoin rules", ["BTC", "ETH"]) == []
 
 
+def test_tag_instruments_requires_word_boundaries_not_substrings():
+    """cy307: a short ticker matched as a raw SUBSTRING tags every English word containing it.
+    ON (Orochi Network) was tagged on 'live on Starknet' / 'banks on public blockchains' and 22
+    phantom social mentions, polluting the News + Sentiment feeds for multiple cycles."""
+    assert tag_instruments("Rollup goes live on Starknet", ["ON"]) == []
+    assert tag_instruments("Traders stay long into London close", ["ON"]) == []
+    assert tag_instruments("Beyond the second month, conditions worsen", ["ON"]) == []
+    # the genuine mention still tags
+    assert tag_instruments("ON rallies 74% on volume", ["ON"]) == ["ON"]
+    assert tag_instruments("$ON breaks out", ["ON"]) == ["ON"]
+    # and a real base is not swallowed by a longer word (SUI vs 'suit', UNI vs 'university')
+    assert tag_instruments("The lawsuit named a bank", ["SUI"]) == []
+    assert tag_instruments("University endowment buys", ["UNI"]) == []
+    assert tag_instruments("SUI and UNI both dip", ["SUI", "UNI"]) == ["SUI", "UNI"]
+    # multi-word aliases keep working
+    assert tag_instruments("Binance Coin holders vote", ["BNB"]) == ["BNB"]
+
+
 def test_parse_rss_extracts_items_and_tags():
     items = parse_rss(_RSS, source="CoinDesk", symbols=["BTC", "ETH"])
     assert len(items) == 3 and all(isinstance(i, NewsItem) for i in items)
