@@ -130,6 +130,25 @@ def test_brief_includes_derivatives_signals():
     assert "oi_change" in b
 
 
+def test_brief_carries_coin_count_oi_alongside_usd_notional():
+    """cy311: `oi_change` is USD NOTIONAL = contracts x price, so its % change conflates positioning
+    with price — and the bias is DIRECTIONAL: in a falling market USD-OI drops even while contracts
+    build, which is exactly what manufactured the desk's 13-cycle 'no with-regime short has rising
+    OI' reading. HYPE printed -2.96% USD but +1.08% in contracts. Surface both."""
+    class Diverging(FakeExchange):
+        def open_interest_history(self, symbol, period="4h", limit=200):
+            # contracts BUILD +10% while price halves -> USD notional FALLS 45%
+            return pd.DataFrame(
+                {"timestamp": pd.date_range("2026-01-01", periods=3, freq="4h", tz="UTC"),
+                 "oi_amount": [100.0, 105.0, 110.0], "oi_value": [1.0e7, 0.75e7, 0.55e7]})
+    b = build_symbol_brief(Diverging(_uptrend()), "BTC/USDT:USDT")
+    assert b["oi_change"] < 0                       # USD notional says "exhausting"
+    assert b["oi_change_coin"] == pytest.approx(0.10, abs=1e-9)   # contracts say BUILDING
+    assert b["oi_amount"] == pytest.approx(110.0)
+    # and the two must be reported independently, never collapsed into one number
+    assert b["oi_change"] != b["oi_change_coin"]
+
+
 def test_brief_degrades_when_derivatives_unavailable():
     class NoDeriv(FakeExchange):
         def open_interest_history(self, *a, **k):

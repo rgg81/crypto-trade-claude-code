@@ -157,7 +157,8 @@ def _derivatives(exchange, symbol: str, timeframe: str, now: datetime | None = N
     byte-identical only on the FORMING bar (cy50: DOGE==ETH on the in-progress candle) while the
     CLOSED bar is clean per symbol — so reading the closed bar avoids the alias at the source (the
     flag_duplicate_positioning de-dupe stays a fail-safe backstop). Pass `now` for the drop."""
-    out = {"oi_value": None, "oi_change": None, "long_short_ratio": None, "long_account": None}
+    out = {"oi_value": None, "oi_change": None, "oi_amount": None, "oi_change_coin": None,
+           "long_short_ratio": None, "long_account": None}
     try:
         oi = last_completed_frame(
             exchange.open_interest_history(symbol, period=timeframe, limit=12), now, timeframe)
@@ -165,6 +166,20 @@ def _derivatives(exchange, symbol: str, timeframe: str, now: datetime | None = N
             out["oi_value"] = float(oi["oi_value"].iloc[-1])
             base = oi["oi_value"].iloc[0]
             out["oi_change"] = float(oi["oi_value"].iloc[-1] / base - 1.0) if base else 0.0
+            # COIN/CONTRACT count alongside the USD notional (cy311). `oi_value` is contracts x
+            # PRICE, so its % change conflates positioning with price — and the error is
+            # DIRECTIONALLY BIASED: in a falling market USD-OI drops even while contracts build,
+            # and in a rising one it inflates a build that is mostly price. That systematically
+            # strips the fuel leg off with-regime SHORT theses while over-crediting LONGs, which is
+            # a long/short-symmetry defect (Rule 5), not a rounding quibble — it is what
+            # manufactured the desk's 13-cycle "no with-regime short has rising OI" reading (cy311:
+            # HYPE -2.96% USD vs +1.08% contracts; UNI +12.53% vs +5.82%; ZEC +0.83% vs -0.50%,
+            # a sign INVERSION). Score every fuel leg on the coin count; report both when they
+            # disagree in sign.
+            amt_base = oi["oi_amount"].iloc[0]
+            out["oi_amount"] = float(oi["oi_amount"].iloc[-1])
+            out["oi_change_coin"] = (float(oi["oi_amount"].iloc[-1] / amt_base - 1.0)
+                                     if amt_base else 0.0)
     except Exception:
         pass
     try:

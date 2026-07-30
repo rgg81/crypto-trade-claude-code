@@ -23,6 +23,8 @@ _CARD_FIELDS = (
     # baseline-relative carry read (cy309): payer/annualized alone label the 10.95%/yr
     # zero-information baseline as "longs pay" — surface the premium classification too.
     "funding_premium", "funding_vs_baseline",
+    # coin-count OI beside USD notional (cy311): oi_change alone conflates price with positioning
+    "oi_amount", "oi_change_coin",
     "long_short_ratio", "long_account", "oi_change",
 )
 
