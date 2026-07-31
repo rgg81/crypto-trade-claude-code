@@ -47,8 +47,18 @@ def circuit_breaker(
     mult = 1.0
     reasons: list[str] = []
 
-    if dd_from_peak >= 0.05:           # step-down: halve risk past -5% from peak
+    # GRADUATED step-down by DEPTH (cy313, user-authorized). This was a CLIFF — dd>=5% halved
+    # risk outright — which made a shallow drawdown SELF-PERPETUATING: half size produces
+    # half-speed recovery, so the desk stays over the line and stays halved. Observed live: the
+    # desk sat at dd 5.04% risking 0.25% per trade (1.0 x caution 0.5 x dd 0.5) for many cycles
+    # while running ~7.5% behind its monthly target. The brake is KEPT, the latch is removed:
+    # 0.75 in the shallow band, and the original 0.5 preserved for genuinely deep drawdowns.
+    # The multiplier never exceeds 1.0, and every hard HALT path below is untouched.
+    if dd_from_peak >= 0.10:           # deep: halve risk (unchanged severity)
         mult = 0.5
+        reasons.append("dd>=10% step-down")
+    elif dd_from_peak >= 0.05:         # shallow: brake, don't halve
+        mult = 0.75
         reasons.append("dd>=5% step-down")
     if daily_pnl_pct <= -0.03:
         allow_new = False
