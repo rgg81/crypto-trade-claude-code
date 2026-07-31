@@ -240,6 +240,20 @@ def preflight_step(exchange, settings: Settings, state_dir, memory_dir,
                   # paste this verbatim into EVERY agent prompt (analysts/screen/debate/RM/Trader).
                   "performance_block": performance_block(_ps, n_open=len(positions),
                                                          n_armed=_n_armed)}
+        # FUNNEL panel (cy315): the deployment counterpart to performance_block. It measures how
+        # much IDENTIFIED edge actually reached execution and alerts on the blockage signature
+        # (consecutive cycles that found edge and acted on none). Deliberately NOT a cash quota —
+        # see funnel_metrics for why counting the funnel beats mandating a balance. Advisory.
+        try:
+            from futures_fund.funnel_metrics import funnel_block, read_funnel_stats
+            _fs = read_funnel_stats(state_dir, memory_dir, window=12)
+            pacing["funnel"] = {"cycles": _fs.cycles, "acted": _fs.acted,
+                                "identified": _fs.identified, "conversion": _fs.conversion,
+                                "edge_declined": _fs.edge_declined,
+                                "stalled_streak": _fs.stalled_streak}
+            pacing["funnel_block"] = funnel_block(_fs)
+        except Exception:  # noqa: BLE001 — advisory; never break the cycle on a panel
+            pass
     except Exception:  # noqa: BLE001 — pacing is advisory; never break the cycle
         pacing = {"mode": "soft", "directive": "SOFT — pacing unavailable; trade conservatively.",
                   "suggested_risk_mult": 0.5}
