@@ -11,9 +11,11 @@ from futures_fund.regime import (
     read_regime_history,
 )
 
-NOW = datetime(2026, 6, 1, 8, 7, tzinfo=UTC)   # floor4 -> 08:00; prior candle 04:00
+# floor_cycle -> 08:00; the PRIOR served candle is one CADENCE step back (CYCLE_HOURS=8 -> 00:00,
+# not 04:00 — the persistence chain walks served candles, not 4h data bars).
+NOW = datetime(2026, 6, 1, 8, 7, tzinfo=UTC)
 C0 = "2026-06-01T08:00:00+00:00"
-C_PREV = "2026-06-01T04:00:00+00:00"
+C_PREV = "2026-06-01T00:00:00+00:00"
 
 
 def _brief(sym, down=True):

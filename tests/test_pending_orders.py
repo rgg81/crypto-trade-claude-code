@@ -30,6 +30,45 @@ def _save(tmp, orders):
     save_pending_orders(tmp, orders)
 
 
+def test_multi_bar_window_preserves_4h_semantics_at_a_slower_poll(tmp_path):
+    """cy313 (8h cadence): triggers evaluate 4h CLOSES, so WHICH 4h closes count must not depend on
+    how often the loop polls. Exits already read every completed candle since the last-served one
+    (cycle.py gap_window); the fire path read only iloc[-1], so at an 8h poll a break that closed
+    through in the FIRST of the two 4h bars — or a limit TOUCHED in it — was silently missed."""
+    # stop_entry: the FIRST bar closed through 100, the second closed back above it
+    _save(tmp_path, [_o(kind="stop_entry", direction="short", trigger=100, stop=105)])
+    seq = [{"open": 101, "high": 102, "low": 97, "close": 98},     # confirmed break here
+           {"open": 98, "high": 103, "low": 98, "close": 102}]     # reverted
+    bar = {"open": 98, "high": 103, "low": 97, "close": 102, "seq": seq}
+    fired, _, remaining = check_pending_orders(tmp_path, {"BTCUSDT": bar}, 5)
+    assert len(fired) == 1 and not remaining          # the 4h close-through still counts
+    assert fired[0].fire_fill is not None
+
+    # limit_entry: TOUCHED in the first bar only — a real resting limit would have filled
+    _save(tmp_path, [_o(kind="limit_entry", direction="short", trigger=100, stop=105)])
+    seq2 = [{"open": 98, "high": 101, "low": 97, "close": 99},      # touches 100
+            {"open": 99, "high": 99.5, "low": 98, "close": 99}]     # never reaches it
+    fired2, _, remaining2 = check_pending_orders(
+        tmp_path, {"BTCUSDT": {"open": 98, "high": 101, "low": 97, "close": 99, "seq": seq2}}, 5)
+    assert len(fired2) == 1 and not remaining2
+
+    # a window in which NOTHING closed through must NOT fire
+    _save(tmp_path, [_o(kind="stop_entry", direction="short", trigger=100, stop=105)])
+    seq3 = [{"open": 102, "high": 103, "low": 101, "close": 102},
+            {"open": 102, "high": 104, "low": 101, "close": 103}]
+    f3, _, r3 = check_pending_orders(
+        tmp_path, {"BTCUSDT": {"open": 102, "high": 104, "low": 101, "close": 103, "seq": seq3}}, 5)
+    assert not f3 and len(r3) == 1
+
+
+def test_single_bar_callers_are_unchanged_without_seq(tmp_path):
+    """Back-compat: a bar dict with no `seq` behaves exactly as before (the 4h-cadence path)."""
+    _save(tmp_path, [_o(kind="stop_entry", direction="short", trigger=100, stop=105)])
+    fired, _, remaining = check_pending_orders(
+        tmp_path, {"BTCUSDT": {"open": 101, "high": 101, "low": 97, "close": 98}}, 5)
+    assert len(fired) == 1 and not remaining
+
+
 def test_stop_entry_short_fires_on_close_below_trigger(tmp_path):
     _save(tmp_path, [_o(kind="stop_entry", direction="short", trigger=100, stop=105)])
     fired, expired, remaining = check_pending_orders(tmp_path, {"BTCUSDT": {"close": 99, "low": 98, "high": 101}}, 5)

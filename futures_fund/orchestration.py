@@ -969,6 +969,10 @@ def gate_execute_step(exchange, settings: Settings, state_dir, memory_dir,
     # already dropped). A feed gap -> no entry -> fail-safe (no stamp, no auto-cancel).
     swings_by_symbol: dict = {}
     quadrant_by_symbol: dict = {}   # raw symbol -> simple_regime quadrant (for adaptive RR floor)
+    # Floor of the missed-candle window for the FIRE path — the same primitive the exit audit uses
+    # (see audit_and_reflect). None (cold start) -> the single latest bar = prior behavior.
+    from futures_fund.scheduling import last_served_candle as _last_served_candle
+    _fire_window_floor = _last_served_candle(state_dir, now)
     for raw, uni in ctx.raw_to_unified.items():
         # A stop_entry/limit_entry must fire off the latest COMPLETED 4h bar — NOT the still-forming
         # candle the OHLCV feed returns as iloc[-1] (its transient close flips on every tick). Drop
@@ -979,8 +983,28 @@ def gate_execute_step(exchange, settings: Settings, state_dir, memory_dir,
             continue
         try:
             bar = df.iloc[-1]
+            # `seq` = EVERY completed bar the gate missed since the last-served candle, oldest
+            # first, so the fire path keeps 4h close/touch semantics at ANY poll cadence (cy313's
+            # 8h change): at an 8h loop two 4h bars complete per cycle, and reading only iloc[-1]
+            # silently dropped a break that closed through — or a limit that was touched — in the
+            # first of them. This mirrors the gap_window exits already use. The top-level
+            # open/high/low/close stay the LATEST bar so single-bar callers are unchanged.
+            seq_rows = df
+            if _fire_window_floor is not None:
+                try:
+                    seq_rows = df[df["timestamp"] >= _fire_window_floor]
+                    if not len(seq_rows):
+                        seq_rows = df.iloc[-1:]
+                except (KeyError, TypeError, ValueError):
+                    seq_rows = df.iloc[-1:]
+            else:
+                seq_rows = df.iloc[-1:]
+            seq = [{"open": float(r["open"]), "high": float(r["high"]),
+                    "low": float(r["low"]), "close": float(r["close"])}
+                   for _, r in seq_rows.iterrows()]
             bars_by_symbol[raw] = {"open": float(bar["open"]), "high": float(bar["high"]),
-                                   "low": float(bar["low"]), "close": float(bar["close"])}
+                                   "low": float(bar["low"]), "close": float(bar["close"]),
+                                   "seq": seq}
         except (KeyError, TypeError, ValueError):
             pass
         if raw in oi_gate_syms:   # completed-bar OI aligned to the same `now` the bar was read at

@@ -30,7 +30,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 UTC = timezone.utc
-_CANDLE = timedelta(hours=4)
+# CADENCE of the full funnel, in hours (cy313: 4 -> 8, user-directed, to halve the token cost of a
+# team run). This is NOT the data timeframe — see floor_cycle. Must divide 24 so the grid is stable
+# across days. Every candle-grid consumer derives from this single constant so they cannot drift.
+CYCLE_HOURS = 8
+_CANDLE = timedelta(hours=CYCLE_HOURS)
 # Tolerate a served candle up to ONE step ahead of now's boundary, then distrust as corrupt.
 # WHY: under a correct monotonic clock a served candle is always <= now's boundary
 # (candle = floor4(start) <= floor4(now)), so this tolerance is dormant in normal operation. It
@@ -44,10 +48,21 @@ _CANDLE = timedelta(hours=4)
 _FUTURE_TOL = _CANDLE
 
 
-def floor4(dt: datetime) -> datetime:
-    """Floor a tz-aware UTC datetime to the 4h candle grid (00/04/08/12/16/20)."""
-    assert dt.tzinfo is not None, "floor4 requires a tz-aware datetime"
-    return dt.replace(hour=(dt.hour // 4) * 4, minute=0, second=0, microsecond=0)
+def floor_cycle(dt: datetime) -> datetime:
+    """Floor a tz-aware UTC datetime to the CYCLE grid (CYCLE_HOURS=8 -> 00/08/16 UTC).
+
+    NOTE this is the CADENCE grid — how often the full funnel runs — NOT the DATA timeframe, which
+    stays 4h (`settings.timeframe`): the briefs, ATR/ADX/swings, exits and trigger fires all still
+    read 4h bars. cy313 moved the cadence 4h -> 8h to halve the token cost of a full team run. That
+    is only safe because BOTH bar-consuming paths read every completed candle since the last-served
+    one rather than just the latest: exits via `replay.gap_window`, and the fire path via the `seq`
+    window built in `orchestration.gate_execute_step`. Keep those two properties if this changes."""
+    assert dt.tzinfo is not None, "floor_cycle requires a tz-aware datetime"
+    return dt.replace(hour=(dt.hour // CYCLE_HOURS) * CYCLE_HOURS,
+                      minute=0, second=0, microsecond=0)
+
+
+floor4 = floor_cycle   # back-compat alias for existing call sites (gate_execute_cli, regime)
 
 
 def _parse_utc(raw) -> datetime | None:

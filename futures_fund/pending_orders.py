@@ -336,25 +336,40 @@ def check_pending_orders(state_dir, bars_by_symbol: dict, cycle_no: int,
         bar = bars_by_symbol.get(o.symbol)
         fire = consumed = False
         if bar is not None and not _wrong_side_stop(o):
-            close, low, high = bar.get("close"), bar.get("low"), bar.get("high")
-            if o.kind == "stop_entry":  # confirmed break on the bar CLOSE
-                fire = (o.direction == "short" and close is not None and close < o.trigger_level) or \
-                       (o.direction == "long" and close is not None and close > o.trigger_level)
-                if fire and o.require_oi_rising:   # symmetric fresh-OI gate (fail-safe)
-                    fire = _oi_confirms(oi_change_by_symbol, o.symbol)
-                if fire:                           # GAP-HONEST FILL (direction-agnostic, Rule 5):
-                    o.fire_fill = _gap_honest_fill(o.trigger_level, bar.get("open"), low, high)
-            else:                        # limit_entry: TOUCH of the level
-                if o.direction == "long" and low is not None and low <= o.trigger_level:
-                    if low <= o.stop:    # knife guard: bar tagged trigger AND stop in one bar
-                        consumed = True
-                    else:
-                        fire = True
-                elif o.direction == "short" and high is not None and high >= o.trigger_level:
-                    if high >= o.stop:
-                        consumed = True
-                    else:
-                        fire = True
+            # Evaluate EVERY completed 4h bar the gate missed, oldest first — the same
+            # since-last-served discipline exits already use (cycle.py gap_window). WHY (cy313,
+            # the 8h-cadence change): triggers fire off 4h CLOSES/TOUCHES, so WHICH 4h bars count
+            # must not depend on how often the loop polls. Reading only the latest bar meant that
+            # at an 8h poll a confirmed break that closed through in the FIRST of the two 4h bars,
+            # or a limit TOUCHED in it, was silently skipped — a live resting order would have
+            # filled. Iterating oldest-first also fills from the bar that actually triggered,
+            # keeping the gap-honest price honest. `seq` absent -> the single-bar path, unchanged.
+            seq = bar.get("seq") or [bar]
+            for b in seq:
+                close, low, high = b.get("close"), b.get("low"), b.get("high")
+                if o.kind == "stop_entry":  # confirmed break on the bar CLOSE
+                    fire = (o.direction == "short" and close is not None
+                            and close < o.trigger_level) or \
+                           (o.direction == "long" and close is not None
+                            and close > o.trigger_level)
+                    if fire and o.require_oi_rising:   # symmetric fresh-OI gate (fail-safe)
+                        fire = _oi_confirms(oi_change_by_symbol, o.symbol)
+                    if fire:                       # GAP-HONEST FILL (direction-agnostic, Rule 5):
+                        o.fire_fill = _gap_honest_fill(o.trigger_level, b.get("open"), low, high)
+                        break
+                else:                        # limit_entry: TOUCH of the level
+                    if o.direction == "long" and low is not None and low <= o.trigger_level:
+                        if low <= o.stop:    # knife guard: bar tagged trigger AND stop in one bar
+                            consumed = True
+                        else:
+                            fire = True
+                    elif o.direction == "short" and high is not None and high >= o.trigger_level:
+                        if high >= o.stop:
+                            consumed = True
+                        else:
+                            fire = True
+                    if fire or consumed:
+                        break
         elif bar is not None and _wrong_side_stop(o):
             consumed = True              # inverted geometry -> drop, never re-arm
         if fire:                          # FIRE wins over expiry

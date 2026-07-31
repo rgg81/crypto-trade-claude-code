@@ -156,7 +156,12 @@ from datetime import timedelta  # noqa: E402
 
 from futures_fund.regime import append_regime_history  # noqa: E402
 
-_CANDLE = timedelta(hours=4)
+# The persistence chain steps SERVED CANDLES, so this must track the CADENCE, not the 4h data
+# timeframe — hardcoding 4h here silently stopped exercising the chain when cy313 moved the
+# cadence to 8h (the walk looked for a candle the test never wrote, so `confirmed` never fired).
+from futures_fund.scheduling import CYCLE_HOURS  # noqa: E402
+
+_CANDLE = timedelta(hours=CYCLE_HOURS)
 
 
 def _near_boundary_briefs():

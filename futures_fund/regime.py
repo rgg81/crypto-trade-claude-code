@@ -27,10 +27,16 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
-from futures_fund.scheduling import floor4
+from futures_fund.scheduling import CYCLE_HOURS, floor_cycle
 
 _MAJORS = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT"]
-_CANDLE = timedelta(hours=4)
+# The persistence chain walks SERVED CANDLES, so this step MUST be the cadence (floor_cycle's
+# grid), never a hardcoded data-timeframe. cy313 caught this the moment the cadence moved 4h -> 8h:
+# history is keyed by floor_cycle(now) but the walk still stepped back 4h, so `cur - step` never
+# landed on a stored key, `_persistence_count` pinned at 1, and `confirmed` could NEVER become True
+# again in EITHER direction — silently disabling every with-regime/counter-regime distinction the
+# desk makes. Derive it from the one constant so the two can never drift apart again.
+_CANDLE = timedelta(hours=CYCLE_HOURS)
 
 # score weights (sum 1.0); score in ~[-1, +1], NEGATIVE = risk-off
 _W_BREADTH, _W_BTC, _W_FNG, _W_NEWS = 0.40, 0.35, 0.15, 0.10
@@ -48,7 +54,7 @@ class RegimeState(BaseModel):
                                     # OR risk_on) persisted >= K candles. NOT a permission gate.
     score: float
     drivers: dict = Field(default_factory=dict)
-    candle: str = ""                # floor4(now).isoformat() — served-candle key
+    candle: str = ""                # floor_cycle(now).isoformat() — served-candle key
     cycle_no: int = 0
 
 
@@ -188,7 +194,7 @@ def classify_regime(state_dir, market_context: dict, briefs: list[dict], now: da
                     cycle_no: int, agent_override: dict | None = None, news_risk_off=None,
                     k: int = 2) -> RegimeState:
     """Deterministic regime + symmetric (justification-gated) agent override. Never raises."""
-    candle = floor4(now)
+    candle = floor_cycle(now)
     det, score, quorum, drivers = _deterministic(briefs, market_context, news_risk_off)
     persistence = _persistence_count(state_dir, det, candle, k)
     # SYMMETRIC: a directional label (risk_off OR risk_on) that has persisted >= K candles with
