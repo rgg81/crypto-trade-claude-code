@@ -9,6 +9,7 @@ import json
 import sys
 from datetime import UTC, datetime
 
+from futures_fund import rate_limit
 from futures_fund.config import load_settings
 from futures_fund.cycle_io import load_output, save_output
 from futures_fund.exchange import FuturesExchange
@@ -27,12 +28,18 @@ def main() -> None:
     ap.add_argument("--symbols", default=None,
                     help="comma-separated unified symbols (the Watcher's picks); overrides "
                          "config. Held positions are folded in automatically.")
+    ap.add_argument("--weight-threshold", type=int, default=rate_limit.DEFAULT_THRESHOLD,
+                    help="run only when the IP's used weight is under this (0 disables)")
     args = ap.parse_args()
     settings = load_settings()
     # explicit --symbols (even empty) is the Watcher's universe for this cycle; never the default
     if args.symbols is not None:
         syms = [s.strip() for s in args.symbols.split(",") if s.strip()]
         settings = settings.model_copy(update={"symbols": syms})
+    # cy317: wait for real IP-weight headroom BEFORE from_settings (which runs
+    # load_markets). A weight-1 probe proves no ACTIVE ban but is blind to a
+    # drained budget — the state that makes the next burst trip a fresh 418.
+    rate_limit.guard(settings, threshold=args.weight_threshold)
     ex = FuturesExchange.from_settings(settings)
     payload = load_output("state", args.cycle, "proposals")
     # The agent path ALWAYS carries a holdings review (possibly empty). A missing/null management
