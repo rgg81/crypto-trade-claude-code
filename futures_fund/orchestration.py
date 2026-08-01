@@ -1044,9 +1044,29 @@ def gate_execute_step(exchange, settings: Settings, state_dir, memory_dir,
         f"dropped HELD-SYMBOL {o.direction} {o.kind} {o.symbol} @ {o.trigger_level} — position "
         f"already open on {o.symbol} (no stacking; the team flips via a holdings CLOSE)"
         for o in held_dropped]
+    # cy317 fail-loud twin: the KNIFE-guard and WRONG-SIDE consumptions inside check_pending_orders
+    # were the last silent trigger drops — the order vanished from the store with no counter and no
+    # reason, so `triggers_remaining` merely decremented (cy317 UNI: long limit 4.235 / stop 4.125,
+    # the 04:00 bar low 4.081 tagged entry AND stop in one bar). The DECISION is right — a bar that
+    # tags both is unresolvable intrabar without tick data — but it must be REPORTED. `held` is
+    # excluded here because held_dropped above already counts it; double-counting would inflate it.
+    _consumed: list = []
     fired, expired, remaining = check_pending_orders(state_dir, bars_by_symbol, cycle_no,
                                                      held_symbols=held_symbols,
-                                                     oi_change_by_symbol=oi_change_by_symbol)
+                                                     oi_change_by_symbol=oi_change_by_symbol,
+                                                     consumed_out=_consumed)
+    _knife_reasons = {
+        "knife": ("KNIFE-GUARD", "the bar tagged BOTH the trigger and the stop — unresolvable "
+                                 "intrabar without tick data, so the fill is not booked"),
+        "wrong_side": ("WRONG-SIDE", "inverted stop geometry (stop on the wrong side of the "
+                                     "trigger) — never armable, never re-armed"),
+    }
+    consumed_actions = [
+        f"dropped {_knife_reasons[r][0]} {o.direction} {o.kind} {o.symbol} @ {o.trigger_level} "
+        f"(stop {o.stop}) — {_knife_reasons[r][1]}; re-arm at a fresh level if still valid"
+        for o, r in _consumed if r in _knife_reasons]
+    triggers_dropped_knife = sum(1 for _, r in _consumed if r == "knife")
+    triggers_dropped_wrong_side = sum(1 for _, r in _consumed if r == "wrong_side")
 
     # AUTO-REVALIDATE armed stop_entry geometry — but ONLY for triggers that did NOT fire this bar.
     # A trigger in `fired` CLOSED THROUGH its level this bar, so a LIVE resting stop FIRED —
@@ -1387,6 +1407,11 @@ def gate_execute_step(exchange, settings: Settings, state_dir, memory_dir,
     if held_dropped_actions:                         # surface each (Rule 6): was a silent drop
         report.setdefault("actions", []).extend(held_dropped_actions)
         report.setdefault("warnings", []).extend(held_dropped_actions)
+    report["triggers_dropped_knife"] = triggers_dropped_knife          # cy317: was a silent drop
+    report["triggers_dropped_wrong_side"] = triggers_dropped_wrong_side
+    if consumed_actions:                             # surface each (Rule 6, fail-loud)
+        report.setdefault("actions", []).extend(consumed_actions)
+        report.setdefault("warnings", []).extend(consumed_actions)
     report["triggers_expiry_extended"] = triggers_expiry_extended  # reach-floored expiry windows
     report["proposals_rerouted"] = len(_rerouted)    # resting orders misrouted into proposals
     if reroute_actions:                              # surface each (Rule 6, fail-loud)

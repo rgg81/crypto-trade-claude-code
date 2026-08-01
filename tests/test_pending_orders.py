@@ -568,3 +568,78 @@ def test_adaptive_expiry_cycles_scales_with_reach():
     assert adaptive_expiry_cycles(float("nan")) == 2
     assert adaptive_expiry_cycles(-1.0) == 2
     assert adaptive_expiry_cycles(None) == 2
+
+
+# --- cy317: the SILENT-CONSUMPTION fail-loud gap -------------------------------------------
+# `check_pending_orders` CONSUMES an order in two cases — the limit-entry knife guard (a bar
+# tagged both the trigger and the stop, unresolvable intrabar without tick data) and inverted
+# wrong-side stop geometry. Both are the RIGHT call. But the order vanished from the store with
+# NO counter, NO reason and NO warning: it is in none of (fired, expired, remaining), so the
+# report showed `triggers_remaining` simply decrement and the team had no way to learn why.
+# That is the cy179 held-drop / cy245 dust-drop / cy275 unsupported-action class exactly.
+# Live case that forced this: cy317 UNI long limit 4.235 / stop 4.125, where the 04:00 bar
+# printed low 4.081 — tagging entry AND stop in one bar.
+
+def test_knife_guard_consumption_is_reported_not_silent(tmp_path):
+    _save(tmp_path, [_o(kind="limit_entry", direction="long", trigger=4.235, stop=4.125,
+                        tps=[4.545], symbol="UNIUSDT")])
+    bar = {"open": 4.302, "high": 4.305, "low": 4.081, "close": 4.097}
+    consumed: list = []
+    fired, expired, remaining = check_pending_orders(
+        tmp_path, {"UNIUSDT": bar}, 5, consumed_out=consumed)
+    assert (fired, expired, remaining) == ([], [], [])      # behavior UNCHANGED: still dropped
+    assert len(consumed) == 1
+    order, reason = consumed[0]
+    assert order.symbol == "UNIUSDT"
+    assert reason == "knife"
+
+
+def test_knife_guard_is_symmetric_for_a_short_limit(tmp_path):
+    """Long/short co-equal: a short limit whose bar tagged trigger AND stop reports identically."""
+    _save(tmp_path, [_o(kind="limit_entry", direction="short", trigger=100.0, stop=105.0)])
+    bar = {"open": 99, "high": 106, "low": 98, "close": 99}     # high tags 100 AND 105
+    consumed: list = []
+    fired, _, remaining = check_pending_orders(
+        tmp_path, {"BTCUSDT": bar}, 5, consumed_out=consumed)
+    assert not fired and not remaining
+    assert [r for _, r in consumed] == ["knife"]
+
+
+def test_wrong_side_consumption_is_reported_with_its_own_reason(tmp_path):
+    """The inverted-geometry drop is a DIFFERENT defect from the knife — keep them distinct."""
+    # a short stop_entry whose stop sits BELOW its trigger is inverted
+    _save(tmp_path, [_o(kind="stop_entry", direction="short", trigger=100.0, stop=95.0)])
+    consumed: list = []
+    fired, _, remaining = check_pending_orders(
+        tmp_path, {"BTCUSDT": {"open": 101, "high": 102, "low": 97, "close": 98}}, 5,
+        consumed_out=consumed)
+    assert not fired and not remaining
+    assert [r for _, r in consumed] == ["wrong_side"]
+
+
+def test_held_symbol_skip_is_reported_too(tmp_path):
+    """The held-guard drop already has a counter upstream; it must also flow through one channel."""
+    _save(tmp_path, [_o(kind="stop_entry", direction="short", trigger=100.0, stop=105.0)])
+    consumed: list = []
+    check_pending_orders(tmp_path, {"BTCUSDT": {"close": 98, "low": 97, "high": 102}}, 5,
+                         held_symbols={"BTCUSDT"}, consumed_out=consumed)
+    assert [r for _, r in consumed] == ["held"]
+
+
+def test_consumed_out_is_optional_and_signature_stays_a_3_tuple(tmp_path):
+    """~30 existing call sites unpack 3 values — the diagnostics channel must not break them."""
+    _save(tmp_path, [_o(kind="limit_entry", direction="long", trigger=4.235, stop=4.125)])
+    result = check_pending_orders(tmp_path, {"BTCUSDT": {"open": 4.3, "high": 4.3,
+                                                         "low": 4.081, "close": 4.1}}, 5)
+    assert isinstance(result, tuple) and len(result) == 3
+
+
+def test_a_clean_limit_fill_reports_no_consumption(tmp_path):
+    """Control: a bar that tags the trigger but NOT the stop fires normally and reports nothing."""
+    _save(tmp_path, [_o(kind="limit_entry", direction="long", trigger=4.235, stop=4.125)])
+    consumed: list = []
+    fired, _, _ = check_pending_orders(
+        tmp_path, {"BTCUSDT": {"open": 4.30, "high": 4.31, "low": 4.20, "close": 4.25}}, 5,
+        consumed_out=consumed)
+    assert len(fired) == 1
+    assert consumed == []

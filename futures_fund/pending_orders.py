@@ -324,14 +324,30 @@ def _gap_honest_fill(trigger_level, open_, low, high):
 
 def check_pending_orders(state_dir, bars_by_symbol: dict, cycle_no: int,
                          held_symbols=frozenset(),
-                         oi_change_by_symbol: dict | None = None) -> tuple[list, list, list]:
+                         oi_change_by_symbol: dict | None = None,
+                         consumed_out: list | None = None) -> tuple[list, list, list]:
     """Evaluate every armed order against the latest COMPLETED 4h bar (RAW-keyed). Returns
     (fired, expired, remaining) — disjoint. FIRE precedes EXPIRY. Held-symbol, knife-guarded, and
     wrong-side orders are CONSUMED (in none of the three lists -> removed from the store). No-bar
-    orders are UNEVALUABLE and stay in `remaining` (still pending) unless they also expire."""
+    orders are UNEVALUABLE and stay in `remaining` (still pending) unless they also expire.
+
+    `consumed_out` (cy317 fail-loud, OPTIONAL so the ~30 existing 3-tuple call sites are
+    untouched): if given, every CONSUMED order is appended as `(order, reason)` with reason in
+    {"held", "knife", "wrong_side"}. Consumption is the right CALL in all three cases, but it
+    used to be INVISIBLE — the order simply vanished from the store with no counter and no
+    warning, so `triggers_remaining` just decremented and the team could not learn why. That is
+    the cy179 held-drop / cy245 dust-drop / cy275 unsupported-action class. Forced by cy317 UNI
+    (long limit 4.235 / stop 4.125; the 04:00 bar printed low 4.081, tagging entry AND stop in
+    one bar). Diagnostics only — no order's fate changes."""
     fired, expired, remaining = [], [], []
+
+    def _consume(order, reason: str):
+        if consumed_out is not None:
+            consumed_out.append((order, reason))
+
     for o in load_pending_orders(state_dir):
         if o.symbol in held_symbols:
+            _consume(o, "held")
             continue  # no stacking against a live position; the team flips via holdings CLOSE
         bar = bars_by_symbol.get(o.symbol)
         fire = consumed = False
@@ -360,21 +376,22 @@ def check_pending_orders(state_dir, bars_by_symbol: dict, cycle_no: int,
                 else:                        # limit_entry: TOUCH of the level
                     if o.direction == "long" and low is not None and low <= o.trigger_level:
                         if low <= o.stop:    # knife guard: bar tagged trigger AND stop in one bar
-                            consumed = True
+                            consumed = "knife"
                         else:
                             fire = True
                     elif o.direction == "short" and high is not None and high >= o.trigger_level:
                         if high >= o.stop:
-                            consumed = True
+                            consumed = "knife"
                         else:
                             fire = True
                     if fire or consumed:
                         break
         elif bar is not None and _wrong_side_stop(o):
-            consumed = True              # inverted geometry -> drop, never re-arm
+            consumed = "wrong_side"      # inverted geometry -> drop, never re-arm
         if fire:                          # FIRE wins over expiry
             fired.append(o)
         elif consumed:
+            _consume(o, consumed)
             continue                      # knife / wrong-side -> removed
         elif cycle_no >= o.expires_cycle:
             expired.append(o)
