@@ -340,3 +340,60 @@ def test_flag_duplicate_positioning_ignores_same_symbol_repeat():
     for b in out:
         assert b["long_short_ratio"] == 2.3456
         assert "positioning_anomaly" not in b
+
+
+# --- cy319: a lesson whose INPUT data is absent from the brief is a silent off-switch -----------
+# The desk minted lesson 7d65f48b at cy317 ("a limit_entry's trigger-to-stop gap must be sized
+# against the symbol's REALIZED completed-bar RANGE, not only the ~0.6-ATR noise band") after
+# UNIUSDT was knife-consumed. At cy319 the RM tried to apply it to a EULUSDT limit and could not:
+# the brief carries `atr` but NO bar-range data. It hedged by sizing down to a 0.35 probe. The
+# orchestrator then measured it from live OHLC and the answer was decisive and ADVERSE -- the
+# proposed 0.759-ATR gap was exceeded by 6 of the last 12 bars (median range 0.727 ATR), a
+# coin-flip chance of consumption. A lesson its own agents cannot evaluate is observationally
+# identical to a lesson that does not exist (the d6da6f70 pattern, applied to lesson INPUTS).
+
+def _range_frame():
+    import pandas as pd
+    # highs/lows chosen so the ranges are 1.0, 2.0, 3.0, 4.0, 10.0 -> median 3.0, max 10.0
+    rows = [(10.0, 9.0), (11.0, 9.0), (12.0, 9.0), (13.0, 9.0), (19.0, 9.0)]
+    return pd.DataFrame({
+        "timestamp": pd.date_range("2026-08-01", periods=len(rows), freq="4h", tz="UTC"),
+        "open": [9.5] * len(rows),
+        "high": [h for h, _ in rows],
+        "low": [ligh for _, ligh in rows],
+        "close": [9.8] * len(rows),
+        "volume": [1.0] * len(rows),
+    })
+
+
+def test_bar_range_stats_are_computed_from_completed_bars():
+    from futures_fund.brief import bar_range_stats
+    s = bar_range_stats(_range_frame(), lookback=5)
+    assert s["bar_range_median"] == 3.0
+    assert s["bar_range_max"] == 10.0
+    assert s["bar_range_mean"] == (1.0 + 2.0 + 3.0 + 4.0 + 10.0) / 5
+
+
+def test_bar_range_stats_respects_the_lookback_window():
+    from futures_fund.brief import bar_range_stats
+    s = bar_range_stats(_range_frame(), lookback=2)   # last two ranges: 4.0 and 10.0
+    assert s["bar_range_median"] == 7.0
+    assert s["bar_range_max"] == 10.0
+
+
+def test_bar_range_stats_never_raises_on_a_short_or_empty_frame():
+    """Fail-SAFE: a feed gap must degrade to None, never break the cycle (Rule 4)."""
+    import pandas as pd
+
+    from futures_fund.brief import bar_range_stats
+    empty = pd.DataFrame({"high": [], "low": []})
+    s = bar_range_stats(empty, lookback=12)
+    assert s["bar_range_median"] is None and s["bar_range_max"] is None
+    assert bar_range_stats(None, lookback=12)["bar_range_max"] is None
+
+
+def test_symbol_brief_surfaces_bar_range_so_the_lesson_is_applicable(monkeypatch):
+    """The whole point: the numbers 7d65f48b needs must reach the agents' brief."""
+    from futures_fund import brief as brief_mod
+    keys = brief_mod.bar_range_stats(_range_frame(), lookback=12).keys()
+    assert {"bar_range_median", "bar_range_mean", "bar_range_max"} <= set(keys)

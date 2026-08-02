@@ -193,6 +193,35 @@ def _derivatives(exchange, symbol: str, timeframe: str, now: datetime | None = N
     return out
 
 
+_BAR_RANGE_LOOKBACK = 12
+
+
+def bar_range_stats(df, lookback: int = _BAR_RANGE_LOOKBACK) -> dict:
+    """Median / mean / max HIGH-LOW range over the last `lookback` COMPLETED bars.
+
+    Feeds lesson 7d65f48b: a `limit_entry` whose (trigger - stop) gap is smaller than the range a
+    single bar routinely spans gets knife-guard CONSUMED (both legs tagged in one bar, no fill ever
+    booked) -- the cy317 UNIUSDT failure. ATR cannot substitute: it is a smoothed average and
+    understates the tail, so a gap that looks safe in ATR terms can still sit inside half the bars'
+    actual swing. `bar_range_max` is reported alongside the median precisely so that tail is visible
+    (cy319 EULUSDT: median 0.727 ATR, max 3.127 ATR -- a 4.3x spread).
+
+    FAIL-SAFE (Rule 4): a missing/short/malformed frame degrades to None rather than raising --
+    a feed gap must never break the cycle.
+    """
+    keys = ("bar_range_median", "bar_range_mean", "bar_range_max")
+    try:
+        rows = df[["high", "low"]].tail(int(lookback))
+        rng = (rows["high"] - rows["low"]).dropna()
+        if rng.empty:
+            return dict.fromkeys(keys)
+        return {"bar_range_median": float(rng.median()),
+                "bar_range_mean": float(rng.mean()),
+                "bar_range_max": float(rng.max())}
+    except Exception:  # noqa: BLE001 -- brief assembly must never raise on a feed gap
+        return dict.fromkeys(keys)
+
+
 def build_symbol_brief(exchange, symbol: str, timeframe: str = "4h",
                        now: datetime | None = None) -> dict:
     """Compact, JSON-serializable per-symbol data bundle the orchestrator injects into the
@@ -208,6 +237,7 @@ def build_symbol_brief(exchange, symbol: str, timeframe: str = "4h",
     # ADX(+DI/-DI) for momentum/trend-strength, EMA-20/50 slopes, swing hi/lo for real S/R.
     adx_val, plus_di, minus_di = adx(df)
     swing_high, swing_low = swing_levels(df)
+    ranges = bar_range_stats(df)
     return {
         "symbol": symbol,
         "timeframe": timeframe,
@@ -226,6 +256,15 @@ def build_symbol_brief(exchange, symbol: str, timeframe: str = "4h",
         "swing_low": swing_low,
         "dist_to_swing_high_pct": round((swing_high - last) / last, 4) if last else None,
         "dist_to_swing_low_pct": round((last - swing_low) / last, 4) if last else None,
+        # REALIZED completed-bar ranges (cy319). Lesson 7d65f48b requires sizing a limit_entry's
+        # trigger-to-stop gap against the range a SINGLE bar actually spans — the ~0.6-ATR noise
+        # band answers "can this stop survive normal wobble", not "can one bar tag BOTH legs".
+        # ATR alone cannot answer that (it is a smoothed average, so it understates the fat tail:
+        # at cy319 EULUSDT's median bar range was 0.727 ATR but its max was 3.127 ATR). Without
+        # these numbers in the brief the RM could not evaluate its own lesson and hedged by
+        # sizing down — a lesson whose inputs are absent is observationally identical to one that
+        # does not exist (the d6da6f70 silent-off-switch pattern, applied to lesson INPUTS).
+        **ranges,
         "funding_rate": float(funding.current_rate),
         "funding_interval_hours": float(funding.interval_hours),
         # Explicit, sign-proof funding direction (cy78 fix): funding_payer is the side that PAYS
