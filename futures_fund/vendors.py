@@ -57,6 +57,14 @@ _ALIASES = {
     "BTC": ("btc", "bitcoin"), "ETH": ("eth", "ethereum"), "SOL": ("sol", "solana"),
     "BNB": ("bnb", "binance coin"), "XRP": ("xrp", "ripple"), "DOGE": ("doge", "dogecoin"),
     "ADA": ("ada", "cardano"), "AVAX": ("avax", "avalanche"),
+    # cy318: full-name aliases for word-like tickers. These are REQUIRED, not decorative — once a
+    # ticker joins _WORDLIKE_TICKERS its bare lowercase form stops matching, so without an alias a
+    # headline like "Chainlink launches CCIP" would tag NOTHING. Only unambiguous names here; a
+    # name that is itself common prose (e.g. "sandbox") would re-introduce the false positive.
+    # NOTE: aliases are matched CASE-INSENSITIVELY, so a word-like ticker's own bare lowercase
+    # form must NEVER appear here — listing "link" would re-open the very hole this closes.
+    "LINK": ("chainlink",), "APE": ("apecoin",),
+    "CAKE": ("pancakeswap",), "MASK": ("mask network",),
 }
 
 
@@ -88,6 +96,13 @@ _WORDLIKE_TICKERS = frozenset({
     "AIR", "ACT", "AGE", "ART", "BAR", "BET", "BIT", "BOX", "GAS", "NEAR", "BANK", "LIVE",
     "REAL", "MOVE", "CORE", "EDGE", "FLOW", "CASH", "FUND", "HOME", "IDEA", "LOOK", "MOON",
     "NEXT", "BEST", "TIME", "LIKE", "JUST", "MORE", "OVER", "BEAT", "RARE", "SAFE", "HOPE",
+    # cy318: liquid perps that are ALSO everyday English words. LINK is the worst offender —
+    # reddit appends "[link] [comments]" boilerplate to EVERY .rss post, so Chainlink was
+    # credited with a mention on essentially every post it ever saw (17 of 25 at cy318, none
+    # real). PUMP matters for the same reason in crypto prose ("pump and dump").
+    "LINK", "SAND", "APE", "CAKE", "MASK", "BAND", "DASH", "PUMP", "STORY", "PEOPLE",
+    "ALPHA", "PORTAL", "DUSK", "WAVES", "IDOL", "BLESS", "GIGGLE", "KEY", "ICE", "TREE",
+    "SPELL", "MAGIC", "ORDER", "POINT", "CHESS", "SLEEP", "TURBO", "BOND", "TRUST", "SUPER",
 })
 
 

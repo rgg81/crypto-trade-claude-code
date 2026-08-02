@@ -273,3 +273,56 @@ def test_fetch_reddit_falls_back_to_rss_when_json_blocked():
     assert len(out["posts"]) == 1 and out["posts"][0]["title"] == "SOL pumping hard"
     assert out["posts"][0]["score"] == 0           # .rss carries no upvote score
     assert out["mentions"]["SOL"]["count"] == 1
+
+
+# --- cy318: the reddit-boilerplate ticker collision -----------------------------------------
+# `_WORDLIKE_TICKERS` makes English-word tickers require an uppercase/cashtag form, because a
+# bare word-boundary match tags the WORD itself (the cy307 ON/Orochi bug). The set was curated
+# by hand and MISSED several liquid perps that are extremely common English words -- LINK worst
+# of all, because reddit appends "[link] [comments]" boilerplate to EVERY .rss post. At cy318
+# the sentiment analyst reported LINK with 17 mentions across 25 posts; all 17 were boilerplate
+# and not one referenced Chainlink. Same class: "sand-bagged" -> SAND, "ate cake" -> CAKE.
+# The failure mode is a FALSE POSITIVE (phantom mentions polluting the sentiment feed), so this
+# list being incomplete is a live bug, not a cosmetic one.
+
+def test_reddit_boilerplate_does_not_tag_chainlink():
+    from futures_fund.vendors import tag_instruments
+    syms = ["LINK", "BTC"]
+    assert tag_instruments("submitted by /u/someone [link] [comments]", syms) == []
+    assert tag_instruments("Here is a link to the docs", syms) == []
+    assert tag_instruments("check the link in my bio", syms) == []
+
+
+def test_uppercase_and_cashtag_link_still_tag():
+    """The guard must not go too far: a REAL Chainlink mention still has to register."""
+    from futures_fund.vendors import tag_instruments
+    syms = ["LINK", "BTC"]
+    assert tag_instruments("LINK broke out today", syms) == ["LINK"]
+    assert tag_instruments("$LINK looking strong", syms) == ["LINK"]
+    assert tag_instruments("Chainlink oracle update", syms) == ["LINK"]   # alias path
+
+
+def test_other_common_english_word_tickers_are_guarded():
+    from futures_fund.vendors import tag_instruments
+    syms = ["SAND", "APE", "CAKE", "MASK", "BAND", "DASH", "PUMP", "STORY"]
+    assert tag_instruments("I sand-bagged it and ate cake", syms) == []
+    assert tag_instruments("wear a mask, join the band, dash to the door", syms) == []
+    assert tag_instruments("this is a pump and dump story", syms) == []
+    # uppercase forms still tag
+    assert tag_instruments("SAND and CAKE are up", syms) == ["SAND", "CAKE"]
+
+
+def test_wordlike_set_covers_the_tickers_that_burned_us():
+    from futures_fund.vendors import _WORDLIKE_TICKERS
+    for t in ("LINK", "SAND", "APE", "CAKE", "MASK", "BAND", "DASH", "PUMP", "STORY", "PEOPLE"):
+        assert t in _WORDLIKE_TICKERS, f"{t} is a common English word and must require uppercase"
+
+
+def test_wordlike_alias_never_reopens_the_lowercase_hole():
+    """A word-like ticker's bare lowercase form must NOT be an alias — aliases match
+    case-insensitively, so listing it would undo the uppercase requirement entirely."""
+    from futures_fund.vendors import _ALIASES, _WORDLIKE_TICKERS
+    for base, aliases in _ALIASES.items():
+        if base.upper() in _WORDLIKE_TICKERS:
+            assert base.lower() not in [a.lower() for a in aliases], (
+                f"{base}: bare lowercase alias re-opens the prose false positive")
