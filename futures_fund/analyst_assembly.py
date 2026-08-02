@@ -100,11 +100,23 @@ def assemble_analyst_reports(technical, derivatives, news, sentiment,
     """Build the CANONICAL flat `analyst_reports.json` payload from the four agents' raw per-symbol
     lists. Maps conviction->confidence and thesis->key_points, normalizes stance synonyms, stamps
     the desk-wide `risk_off_flag` onto every news item's signals, and validates each item against
-    the AnalystReport contract. Raises ValueError on an un-coercible item (orchestrator's bug)."""
+    the AnalystReport contract. Raises ValueError on an un-coercible item (orchestrator's bug).
+
+    PSEUDO-SYMBOL rows (a leading underscore, e.g. the News analyst's `_AGGREGATE` carrier for the
+    desk-wide risk_off flag) are DROPPED here (cy318). They describe the market, not a tradeable
+    instrument — no brief, no market, no price — so letting one through means a downstream consumer
+    can mistake it for a candidate. At cy318 `_AGGREGATE` ranked high enough on stance/confidence
+    that `screen_cli` returned it as one of the five screened names, displacing a real one and
+    offering the RM/Trader something unbuyable. Safe for the regime fold: `aggregate_news_risk_off`
+    folds over EVERY news row and the flag is stamped on all of them, so the carrier is redundant
+    by the time it reaches here."""
     out: list[dict] = []
     for agent, rows in (("technical", technical), ("derivatives", derivatives),
                         ("news", news), ("sentiment", sentiment)):
         for item in (rows or []):
+            sym = item.get("symbol") if isinstance(item, dict) else None
+            if isinstance(sym, str) and sym.startswith("_"):
+                continue
             out.append(_canonical_item(item, agent, news_risk_off_flag=news_risk_off_flag))
     return out
 

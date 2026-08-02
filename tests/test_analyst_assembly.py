@@ -228,3 +228,50 @@ def test_news_fold_recovers_a_cy77_dict_of_lists():
     clean = {"news": [{"symbol": "BTCUSDT", "stance": "neutral", "conviction": 0.2,
                        "signals": {"risk_off_flag": False}}]}
     assert aggregate_news_risk_off(clean) is False        # pass ran, no shock (not degraded None)
+
+
+# --- cy318: the _AGGREGATE pseudo-symbol leaked into the SCREENED tradeable set ---------------
+# The News analyst's established convention emits an `_AGGREGATE` row carrying the desk-wide
+# risk_off_flag alongside its per-symbol rows. That row is a CARRIER, not a report about a
+# tradeable instrument: it has no brief, no market and no price. At cy318 its stance/confidence
+# ranked high enough that `screen_cli` returned "_AGGREGATE" as one of the five screened
+# candidates — displacing a real name and offering the RM/Trader something unbuyable.
+# Dropping it here is safe for the risk_off fold: `aggregate_news_risk_off` folds over EVERY
+# news row (`any(_flag_set(r) for r in news)`) and the flag is stamped on all of them.
+
+def test_aggregate_pseudo_symbol_is_not_emitted_as_a_report():
+    from futures_fund.analyst_assembly import assemble_analyst_reports
+    news = [
+        {"symbol": "_AGGREGATE", "stance": "bearish", "confidence": 0.6,
+         "key_points": ["desk-wide"], "signals": {"risk_off_flag": 1}},
+        {"symbol": "BTCUSDT", "stance": "bearish", "confidence": 0.4,
+         "key_points": ["x"], "signals": {"risk_off_flag": 1}},
+    ]
+    out = assemble_analyst_reports([], [], news, [], news_risk_off_flag=1)
+    syms = [r["symbol"] for r in out]
+    assert "_AGGREGATE" not in syms
+    assert "BTCUSDT" in syms
+
+
+def test_dropping_the_carrier_preserves_the_desk_wide_risk_off_fold():
+    """The flag must survive on the real rows — that is what the regime fold reads."""
+    from futures_fund.analyst_assembly import assemble_analyst_reports
+    from futures_fund.regime_news import aggregate_news_risk_off
+    news = [
+        {"symbol": "_AGGREGATE", "stance": "bearish", "confidence": 0.6,
+         "key_points": ["desk-wide"], "signals": {"risk_off_flag": 1}},
+        {"symbol": "BTCUSDT", "stance": "neutral", "confidence": 0.4,
+         "key_points": ["x"], "signals": {}},
+    ]
+    out = assemble_analyst_reports([], [], news, [], news_risk_off_flag=1)
+    assert aggregate_news_risk_off(out) is True
+
+
+def test_any_underscore_prefixed_pseudo_symbol_is_dropped_from_every_agent():
+    """Generalized: a leading-underscore symbol is a carrier convention, never a tradeable name."""
+    from futures_fund.analyst_assembly import assemble_analyst_reports
+    rows = [{"symbol": "_MARKET", "stance": "neutral", "confidence": 0.5, "key_points": ["x"]},
+            {"symbol": "ETHUSDT", "stance": "neutral", "confidence": 0.5, "key_points": ["x"]}]
+    out = assemble_analyst_reports(rows, rows, rows, rows)
+    assert [r["symbol"] for r in out].count("_MARKET") == 0
+    assert [r["symbol"] for r in out].count("ETHUSDT") == 4
