@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -51,14 +52,42 @@ def read_lessons(memory_dir) -> list[Lesson]:
     return [Lesson.model_validate_json(line) for line in p.read_text().splitlines() if line.strip()]
 
 
+_TAG_SPLIT = re.compile(r"[^a-z0-9]+")
+
+
+def tag_tokens(tags) -> set[str]:
+    """Lowercase WORD-TOKEN set for a tag list — the unit tag relevance is measured in.
+
+    cy321: relevance used to compare raw tag STRINGS as sets, i.e. exact-match-or-nothing, while
+    the corpus grew THREE colliding conventions for the same concepts (1008 hyphenated, 496
+    underscored, 544 single-word — `adx-gate` / `adx_gate` / `ADX_gate` are three spellings of ONE
+    tag). The cost was concrete and severe: lesson 298c6d2f, the desk's only 2-for-2 predictive
+    rule, is tagged `trap-signature` / `vertical-move` / `catalyst-provenance`, and a query naming
+    exactly those concepts as `trap` / `vertical_move` / `catalyst` scored it ZERO relevance — so
+    it did not surface on the one cycle (BICOUSDT) where its own pattern was the central question,
+    and had to be injected into the debate by hand. A validated lesson that cannot be retrieved
+    when its pattern appears is functionally absent at the moment it matters most (the sibling of
+    02629bb9, about RETRIEVAL rather than inputs).
+
+    Tokenizing fixes it in both directions and needs no corpus migration: `trap` now overlaps
+    `trap-signature`, and `vertical_move` matches `vertical-move` exactly. Fail-safe on junk."""
+    out: set[str] = set()
+    for t in tags or []:
+        if not isinstance(t, str):
+            continue
+        out.update(tok for tok in _TAG_SPLIT.split(t.lower()) if tok)
+    return out
+
+
 def score_lesson(lesson: Lesson, now: datetime, query_tags: list[str],
                  w_rec: float = 1.0, w_imp: float = 1.0, w_rel: float = 1.0) -> float:
     """Generative-Agents-style score: recency (Ebbinghaus) + importance + tag relevance (Jaccard).
-    """
+
+    Relevance is Jaccard over normalized WORD TOKENS, not raw tag strings — see `tag_tokens`."""
     hours = max(0.0, (now - lesson.ts).total_seconds() / 3600.0)
     recency = 0.995 ** hours
     importance = lesson.importance / 10.0
-    qt, lt = set(query_tags), set(lesson.tags)
+    qt, lt = tag_tokens(query_tags), tag_tokens(lesson.tags)
     relevance = len(qt & lt) / len(qt | lt) if (qt or lt) else 0.0
     return w_rec * recency + w_imp * importance + w_rel * relevance
 

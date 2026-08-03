@@ -87,3 +87,62 @@ def test_retrieve_respects_top_k(tmp_path):
         append_lesson(tmp_path, _lesson(text=f"l{i}", regime=None, tags=["risk"]),
                       ts=now - timedelta(hours=i + 1))
     assert len(retrieve_lessons(tmp_path, now=now, regime="x", query_tags=["risk"], k=3)) == 3
+
+
+# --- cy321: tag-vocabulary fragmentation silently zeroed retrieval relevance -----------------
+# `score_lesson` compared raw tag STRINGS as sets, so relevance was exact-match-or-nothing. The
+# corpus meanwhile grew THREE competing conventions that collide on the same concepts —
+# 1008 hyphenated tags, 496 underscored, 544 single-word, including `adx-gate` / `adx_gate` /
+# `ADX_gate` as three spellings of ONE tag. At cy321 the desk's only 2-for-2 predictive lesson
+# (298c6d2f, tagged `trap-signature` / `vertical-move` / `catalyst-provenance`) scored ZERO
+# relevance against a query naming exactly those concepts as `trap` / `vertical_move` /
+# `catalyst`, so it never surfaced on the one cycle its own pattern was the central question.
+# A validated lesson that cannot be retrieved when its pattern appears is functionally absent.
+
+def test_tag_tokens_normalizes_separators_and_case():
+    from futures_fund.lessons import tag_tokens
+    assert tag_tokens(["vertical-move"]) == tag_tokens(["vertical_move"]) == {"vertical", "move"}
+    assert tag_tokens(["ADX_gate"]) == tag_tokens(["adx-gate"]) == {"adx", "gate"}
+    assert tag_tokens(["L/S-positioning"]) == {"l", "s", "positioning"}
+
+
+def test_tag_tokens_is_failsafe_on_junk():
+    from futures_fund.lessons import tag_tokens
+    assert tag_tokens(None) == set()
+    assert tag_tokens([]) == set()
+    assert tag_tokens([None, 123, "", "  "]) == set()
+
+
+def test_a_substring_concept_now_scores_nonzero_relevance():
+    """`trap` must match `trap-signature` — the exact cy321 miss."""
+    from datetime import UTC, datetime
+
+    from futures_fund.lessons import Lesson, score_lesson
+    now = datetime(2026, 8, 3, tzinfo=UTC)
+    lz = Lesson(id="x", ts=now, text="t", regime=None, tags=["trap-signature", "vertical-move"],
+                importance=7, provenance=[])
+    hit = score_lesson(lz, now, ["trap", "vertical_move"])
+    miss = score_lesson(lz, now, ["completely", "unrelated"])
+    assert hit > miss, "concept-level overlap must outrank an unrelated query"
+
+
+def test_identical_tag_sets_still_score_full_relevance():
+    """Back-compat: an exact match must not regress."""
+    from datetime import UTC, datetime
+
+    from futures_fund.lessons import Lesson, score_lesson
+    now = datetime(2026, 8, 3, tzinfo=UTC)
+    lz = Lesson(id="x", ts=now, text="t", regime=None, tags=["geometry"], importance=5,
+                provenance=[])
+    same = score_lesson(lz, now, ["geometry"], w_rec=0.0, w_imp=0.0, w_rel=1.0)
+    assert same == 1.0
+
+
+def test_disjoint_tags_still_score_zero_relevance():
+    from datetime import UTC, datetime
+
+    from futures_fund.lessons import Lesson, score_lesson
+    now = datetime(2026, 8, 3, tzinfo=UTC)
+    lz = Lesson(id="x", ts=now, text="t", regime=None, tags=["funding"], importance=5,
+                provenance=[])
+    assert score_lesson(lz, now, ["geometry"], w_rec=0.0, w_imp=0.0, w_rel=1.0) == 0.0
