@@ -84,3 +84,51 @@ def test_market_context_degrades_when_fear_greed_down():
     mc = build_market_context(_Client(fng_fail=True), _settings(), fred_key="k" * 32)
     assert mc["fear_greed"] is None
     assert any("fear" in w.lower() or "sentiment" in w.lower() for w in mc["warnings"])
+
+
+# --- cy320: distinguish a STRUCTURAL engagement gap from a real anomaly ----------------------
+# `_posts_for_sub` tries reddit's /hot.json (which carries score/num_comments) and falls back to
+# /.rss (which structurally carries NEITHER). A live probe at cy320 showed BOTH www.reddit.com and
+# old.reddit.com return 403 for keyless reads, so the desk is permanently on the .rss path and
+# engagement is uniformly zero EVERY cycle — cy317, 318, 319 and 320 all reported "DEGRADED".
+# A warning that fires every single cycle carries no information (the d6da6f70 pattern), and worse
+# it CONFLATES two different states: "we never had this metric" vs "we had it and it went flat".
+# The second is a real anomaly worth acting on; the first is just the feed we have.
+
+def test_rss_sourced_posts_are_unavailable_not_degraded():
+    from futures_fund.market_context import social_engagement_available, social_engagement_degraded
+    social = {"posts": [{"title": "a", "source_kind": "rss"},
+                        {"title": "b", "source_kind": "rss"}]}
+    assert social_engagement_available(social) is False
+    # not an anomaly — we simply never had the metric on this path
+    assert social_engagement_degraded(social) is False
+
+
+def test_json_sourced_posts_with_all_zero_engagement_ARE_degraded():
+    """The real anomaly the cy310 detector was built for must still fire."""
+    from futures_fund.market_context import social_engagement_available, social_engagement_degraded
+    social = {"posts": [{"title": "a", "source_kind": "json", "score": 0, "num_comments": 0},
+                        {"title": "b", "source_kind": "json", "score": 0, "num_comments": 0}]}
+    assert social_engagement_available(social) is True
+    assert social_engagement_degraded(social) is True
+
+
+def test_json_sourced_posts_with_real_engagement_are_healthy():
+    from futures_fund.market_context import social_engagement_available, social_engagement_degraded
+    social = {"posts": [{"title": "a", "source_kind": "json", "score": 42, "num_comments": 7}]}
+    assert social_engagement_available(social) is True
+    assert social_engagement_degraded(social) is False
+
+
+def test_unlabelled_posts_keep_the_legacy_behaviour():
+    """Back-compat: posts with no `source_kind` fall back to the pre-cy320 zero-engagement rule."""
+    from futures_fund.market_context import social_engagement_degraded
+    assert social_engagement_degraded({"posts": [{"title": "a", "score": 0, "num_comments": 0}]})
+    assert not social_engagement_degraded({"posts": [{"title": "a", "score": 5}]})
+
+
+def test_availability_helpers_are_failsafe_on_junk():
+    from futures_fund.market_context import social_engagement_available, social_engagement_degraded
+    for junk in (None, {}, {"posts": []}, {"posts": ["not-a-dict"]}):
+        assert social_engagement_degraded(junk) is False
+        assert social_engagement_available(junk) is False

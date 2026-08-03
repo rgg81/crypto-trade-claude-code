@@ -39,6 +39,9 @@ class SocialPost(BaseModel):
     summary: str = ""
     score: int = 0
     num_comments: int = 0
+    # cy320: which fetch path produced this post — "json" carries engagement, "rss" cannot.
+    # Lets the degrade detector tell a STRUCTURAL gap from a real flat-engagement anomaly.
+    source_kind: str = "json"
     source: str = ""                # the subreddit, e.g. 'CryptoCurrency'
     instruments: list[str] = []
 
@@ -248,7 +251,8 @@ def _posts_for_sub(client, sub: str, symbols: list[str], per_sub: int) -> list[S
     try:
         r = client.get(f"https://www.reddit.com/r/{sub}/.rss", headers={"User-Agent": _REDDIT_UA})
         r.raise_for_status()
-        return [SocialPost(title=i.title, summary=i.summary, source=sub, instruments=i.instruments)
+        return [SocialPost(title=i.title, summary=i.summary, source=sub,
+                           instruments=i.instruments, source_kind="rss")
                 for i in parse_rss(r.content, source=sub, symbols=symbols)[:per_sub]]
     except Exception:
         return []

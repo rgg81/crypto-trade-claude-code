@@ -7,8 +7,34 @@ _FRED_SERIES_LABELS = {"DTWEXBGS": "broad_dollar", "DGS10": "ust_10y",
                        "FEDFUNDS": "fed_funds", "CPIAUCSL": "cpi"}
 
 
+def social_engagement_available(social: dict | None) -> bool:
+    """True when the scrape used a path that CAN carry engagement at all (reddit's /hot.json).
+
+    `_posts_for_sub` tries /hot.json (carries score + num_comments) and falls back to /.rss, which
+    structurally carries NEITHER. A cy320 live probe found BOTH www.reddit.com and old.reddit.com
+    return 403 for keyless reads, so the desk is permanently on the .rss path. Posts tagged
+    `source_kind == "rss"` therefore have no engagement to lose — that is the feed we have, not a
+    fault. Unlabelled posts are treated as available so the pre-cy320 rule still applies to them.
+    Fail-safe: False on empty/missing input."""
+    posts = [p for p in ((social or {}).get("posts") or []) if isinstance(p, dict)]
+    if not posts:
+        return False          # no usable post -> do not CLAIM a capability we cannot verify
+    kinds = {p.get("source_kind") for p in posts}
+    kinds.discard(None)
+    return not kinds or kinds != {"rss"}
+
+
 def social_engagement_degraded(social: dict | None) -> bool:
     """True when the reddit scrape returned POSTS but every one carries zero engagement.
+
+    cy320: this now fires ONLY when engagement was actually AVAILABLE (the /hot.json path) and
+    came back flat. Previously it also fired on the .rss fallback, where score/num_comments do not
+    exist by construction — so it flagged "DEGRADED" on cy317, 318, 319 AND 320, and the Sentiment
+    analyst dutifully capped its own conviction to ~0.15 every time for a condition that is simply
+    the feed's shape. A warning that fires every single cycle carries no information (the d6da6f70
+    silent-off-switch pattern, inverted into an always-on alarm) and it CONFLATES two different
+    states: "we never had this metric" (structural — use `social_engagement_available`) versus
+    "we had it and it went flat" (a real anomaly worth acting on, which this keeps detecting).
 
     The degrade detector used to fire only on ZERO POSTS, so a feed that kept returning post
     TITLES while `score`/`num_comments` came back identically 0 sailed through with an empty
@@ -20,6 +46,8 @@ def social_engagement_degraded(social: dict | None) -> bool:
     posts = (social or {}).get("posts") or []
     if not posts:
         return False
+    if not social_engagement_available(social):
+        return False          # .rss path: no engagement by construction, not an anomaly
     seen_metric = False
     for p in posts:
         if not isinstance(p, dict):
