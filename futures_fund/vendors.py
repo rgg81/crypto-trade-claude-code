@@ -235,19 +235,30 @@ def parse_reddit(payload: dict, subreddit: str, symbols: list[str]) -> list[Soci
     return out
 
 
-def _posts_for_sub(client, sub: str, symbols: list[str], per_sub: int) -> list[SocialPost]:
+def _posts_for_sub(client, sub: str, symbols: list[str], per_sub: int,
+                   state: dict | None = None) -> list[SocialPost]:
     """One subreddit's posts. Tries /hot.json first (richer — carries upvote `score`), which reddit
     OFTEN 403s for keyless/datacenter reads; falls back to the /.rss Atom feed (works keyless but
     has no score). Returns [] if both fail."""
-    try:
-        r = client.get(f"https://www.reddit.com/r/{sub}/hot.json",
-                       params={"limit": per_sub}, headers={"User-Agent": _REDDIT_UA})
-        r.raise_for_status()
-        posts = parse_reddit(r.json(), subreddit=sub, symbols=symbols)
-        if posts:
-            return posts[:per_sub]
-    except Exception:
-        pass
+    # cy323: reddit 403s keyless /hot.json for this IP (established cy320), so every attempt is a
+    # wasted request out of a SHARED rate-limit bucket — and at 2 requests per sub that doubled cost
+    # is what starved the second configured subreddit. Once json has failed within THIS call, skip
+    # it for the remaining subs. Scoped per-call deliberately: a process-global made behaviour
+    # order-dependent across the test suite, which is a smell about the design, not just the tests.
+    st = state if state is not None else {}
+    if not st.get("json_dead"):
+        try:
+            r = client.get(f"https://www.reddit.com/r/{sub}/hot.json",
+                           params={"limit": per_sub}, headers={"User-Agent": _REDDIT_UA})
+            r.raise_for_status()
+            posts = parse_reddit(r.json(), subreddit=sub, symbols=symbols)
+            if posts:
+                return posts[:per_sub]
+            st["json_dead"] = True
+        except Exception:
+            st["json_dead"] = True
+        except Exception:
+            _reddit_json_failures += 1
     try:
         r = client.get(f"https://www.reddit.com/r/{sub}/.rss", headers={"User-Agent": _REDDIT_UA})
         r.raise_for_status()
@@ -258,17 +269,42 @@ def _posts_for_sub(client, sub: str, symbols: list[str], per_sub: int) -> list[S
         return []
 
 
-def fetch_reddit(client, subreddits: list[str], symbols: list[str], per_sub: int = 40) -> dict:
+_REDDIT_PAUSE_SECONDS = 2.5
+
+
+def fetch_reddit(client, subreddits: list[str], symbols: list[str], per_sub: int = 40,
+                 sleep=None, pause_seconds: float = _REDDIT_PAUSE_SECONDS) -> dict:
     """Keyless reddit social-sentiment scrape. Aggregates the top posts and a per-symbol mention
     count + score-weighted sum (the crowd's attention/weight per coin), so the Sentiment analyst
     reads real crowd CONTENT, not just a Fear&Greed number. Per sub it tries /hot.json then falls
     back to the /.rss Atom feed (reddit 403s the keyless JSON but serves the RSS). Graceful: a
-    blocked sub is skipped; if all fail, returns {'posts': [], 'mentions': {}} and the desk caps
-    conviction (the persona handles the degraded read)."""
+    blocked sub is skipped; if all fail, returns empty and the desk caps conviction (the persona
+    handles the degraded read).
+
+    PACING (cy323): each sub costs up to TWO back-to-back requests (json, then the rss fallback),
+    and reddit 429s almost everything after the first. With no delay the SECOND configured
+    subreddit was silently lost every cycle — verified live on the production path, where
+    `fetch_reddit(['CryptoCurrency','CryptoMarkets'])` returned 25 posts ALL from CryptoCurrency
+    and ZERO from CryptoMarkets, while the exception handler swallowed the 429 into []. That is
+    not a redundant source: fetched on its own, CryptoMarkets returned a HYPE mention, a symbol
+    the Sentiment analyst had reported zero coverage on for SEVEN consecutive cycles while
+    correctly complaining the feed only ever showed BTC/ETH. A configured source that never loads
+    is the d6da6f70 silent-off-switch pattern. We now pause between subs, and report any that
+    yielded nothing via `empty_subreddits` so a silent loss becomes a visible one."""
+    if sleep is None:
+        import time as _time
+        sleep = _time.sleep
     seen: set[str] = set()
     posts: list[SocialPost] = []
-    for sub in subreddits:
-        for p in _posts_for_sub(client, sub, symbols, per_sub):
+    empty: list[str] = []
+    _state: dict = {}          # per-call: "has the json path already failed this run?"
+    for i, sub in enumerate(subreddits):
+        if i:                      # pace only BETWEEN subs — never before the first
+            sleep(pause_seconds)
+        got = _posts_for_sub(client, sub, symbols, per_sub, state=_state)
+        if not got:
+            empty.append(sub)
+        for p in got:
             if p.title not in seen:
                 seen.add(p.title)
                 posts.append(p)
@@ -279,7 +315,8 @@ def fetch_reddit(client, subreddits: list[str], symbols: list[str], per_sub: int
             m = mentions.setdefault(sym, {"count": 0, "score_sum": 0})
             m["count"] += 1
             m["score_sum"] += p.score
-    return {"posts": [p.model_dump() for p in posts[:30]], "mentions": mentions}
+    return {"posts": [p.model_dump() for p in posts[:30]], "mentions": mentions,
+            "empty_subreddits": empty}
 
 
 def fetch_macro(client, series: list[str], api_key: str | None) -> dict[str, float]:

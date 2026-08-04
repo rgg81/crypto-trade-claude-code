@@ -23,6 +23,7 @@ _RSS = b"""<?xml version="1.0"?><rss version="2.0"><channel>
 </channel></rss>"""
 
 
+
 def test_tag_instruments_matches_base_and_alias():
     assert tag_instruments("Bitcoin ETFs bleed", ["BTC", "ETH"]) == ["BTC"]
     assert tag_instruments("Ethereum downside; BTC dips", ["BTC", "ETH"]) == ["BTC", "ETH"]
@@ -240,7 +241,8 @@ def test_fetch_reddit_aggregates_score_weighted_mentions_and_dedupes():
                      "https://www.reddit.com/r/CryptoMarkets/hot.json": _Resp(payload=_REDDIT)})
     out = fetch_reddit(c, subreddits=["CryptoCurrency", "CryptoMarkets"],
                        symbols=["BTC", "SOL", "ADA"], per_sub=40)
-    assert set(out.keys()) == {"posts", "mentions"}
+    assert set(out.keys()) == {"posts", "mentions", "empty_subreddits"}
+    assert out["empty_subreddits"] == []          # cy323: every sub loaded
     # deduped by title across the two identical subs
     assert len(out["posts"]) == 3
     # per-symbol mention aggregation, score-weighted
@@ -253,8 +255,11 @@ def test_fetch_reddit_aggregates_score_weighted_mentions_and_dedupes():
 def test_fetch_reddit_degrades_gracefully_on_failure():
     from futures_fund.vendors import fetch_reddit
     c = _NewsClient({})   # every sub 404s
-    out = fetch_reddit(c, subreddits=["CryptoCurrency"], symbols=["BTC"], per_sub=40)
-    assert out == {"posts": [], "mentions": {}}
+    out = fetch_reddit(c, subreddits=["CryptoCurrency"], symbols=["BTC"], per_sub=40,
+                       sleep=lambda _s: None)
+    assert out["posts"] == [] and out["mentions"] == {}
+    # cy323: a sub that yielded nothing is now REPORTED rather than silently swallowed
+    assert out["empty_subreddits"] == ["CryptoCurrency"]
 
 
 def test_config_has_reddit_subreddits():
@@ -326,3 +331,128 @@ def test_wordlike_alias_never_reopens_the_lowercase_hole():
         if base.upper() in _WORDLIKE_TICKERS:
             assert base.lower() not in [a.lower() for a in aliases], (
                 f"{base}: bare lowercase alias re-opens the prose false positive")
+
+
+# --- cy323: the SECOND subreddit was silently lost to reddit rate-limiting ------------------
+# `_posts_for_sub` tries /hot.json then immediately /.rss, so N configured subreddits fire up to
+# 2N back-to-back requests. Reddit 429s everything after roughly the first, and the bare
+# `except Exception: return []` swallowed it — so `fetch_reddit(['CryptoCurrency','CryptoMarkets'])`
+# returned 25 posts ALL from CryptoCurrency and ZERO from CryptoMarkets, every cycle, silently.
+# Verified live at cy323 on the production path. The lost sub is not redundant: fetched on its own
+# it returned a HYPE mention, a symbol the Sentiment analyst had reported zero coverage on for
+# SEVEN straight cycles while it (correctly) complained the feed only ever showed BTC/ETH.
+# A configured source that never actually loads is the d6da6f70 silent-off-switch pattern again.
+
+def test_fetch_reddit_paces_requests_between_subreddits():
+    """A pause must be taken BETWEEN subs so the later ones are not 429'd away."""
+    from futures_fund.vendors import fetch_reddit
+    slept: list = []
+    calls: list = []
+
+    class _R:
+        status_code = 200
+        content = b"<rss><channel></channel></rss>"
+        def raise_for_status(self): pass
+        def json(self): raise ValueError("no json")
+
+    class _C:
+        def get(self, url, **kw):
+            calls.append(url)
+            return _R()
+
+    fetch_reddit(_C(), ["A", "B", "C"], ["BTC"], per_sub=5, sleep=slept.append)
+    assert len(slept) >= 2, f"expected a pause between subs, got {slept}"
+    assert all(s > 0 for s in slept)
+
+
+def test_fetch_reddit_reports_subreddits_that_yielded_nothing():
+    """Fail-loud: a sub that returns no posts must be surfaced, not silently dropped."""
+    from futures_fund.vendors import fetch_reddit
+
+    class _Resp:
+        def __init__(self, ok):
+            self.status_code = 200 if ok else 429
+            self._ok = ok
+        content = b"<rss><channel></channel></rss>"
+        def raise_for_status(self):
+            if not self._ok:
+                raise RuntimeError("429")
+        def json(self): raise ValueError("no json")
+
+    class _C:
+        def __init__(self): self.n = 0
+        def get(self, url, **kw):
+            self.n += 1
+            return _Resp(self.n <= 2)   # only the first sub's attempts succeed
+
+    out = fetch_reddit(_C(), ["GOOD", "BLOCKED"], ["BTC"], per_sub=5, sleep=lambda s: None)
+    assert "empty_subreddits" in out
+    assert "BLOCKED" in out["empty_subreddits"]
+
+
+def test_fetch_reddit_sleep_is_injectable_so_tests_stay_fast():
+    from futures_fund.vendors import fetch_reddit
+
+    class _C:
+        def get(self, url, **kw): raise RuntimeError("blocked")
+
+    out = fetch_reddit(_C(), ["A", "B"], ["BTC"], per_sub=5, sleep=lambda s: None)
+    assert out["posts"] == []
+    assert set(out["empty_subreddits"]) == {"A", "B"}
+
+
+# --- cy323: stop spending half the rate-limit budget on a call that always 403s -------------
+# cy320 established that reddit 403s keyless /hot.json for this IP on BOTH www and old.reddit.com,
+# so the desk ALWAYS falls back to /.rss. But `_posts_for_sub` still tried json first for every
+# sub, spending 2 requests per subreddit where 1 would do — and reddit's limit is a shared bucket,
+# so that doubled cost is exactly what starved the second configured sub (cy323). After enough
+# consecutive json failures we stop attempting it, halving requests per cycle.
+def test_json_attempt_is_skipped_after_it_fails_within_one_call():
+    """One wasted 403 per RUN, not per subreddit — the budget saving that matters."""
+    from futures_fund.vendors import fetch_reddit
+    urls: list = []
+
+    class _Resp:
+        content = b"<rss><channel></channel></rss>"
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            raise ValueError("no json")
+
+    class _C:
+        def get(self, url, **kw):
+            urls.append(url)
+            if "hot.json" in url:
+                raise RuntimeError("403")
+            return _Resp()
+
+    fetch_reddit(_C(), ["A", "B", "C", "D"], ["BTC"], per_sub=5, sleep=lambda _s: None)
+    json_calls = [u for u in urls if "hot.json" in u]
+    assert len(json_calls) == 1, (
+        f"json should be tried once then abandoned for the rest of the call, got {json_calls}")
+
+
+def test_a_working_json_path_is_used_for_every_sub():
+    """Do not disable a path that works."""
+    from futures_fund.vendors import fetch_reddit
+    payload = {"data": {"children": [
+        {"data": {"title": "BTC up", "selftext": "", "score": 5, "num_comments": 2}}]}}
+    urls: list = []
+
+    class _Resp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return payload
+
+    class _C:
+        def get(self, url, **kw):
+            urls.append(url)
+            return _Resp()
+
+    fetch_reddit(_C(), ["A", "B", "C"], ["BTC"], per_sub=5, sleep=lambda _s: None)
+    assert len([u for u in urls if "hot.json" in u]) == 3
+    assert not [u for u in urls if ".rss" in u]
