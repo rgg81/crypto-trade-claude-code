@@ -28,7 +28,8 @@ def main() -> None:
     ids = record_lessons("memory", lessons, ts=datetime.now(UTC))
     scoring = payload.get("lesson_scoring") if isinstance(payload, dict) else None
     dsr = build_scorecard("state", "memory").get("dsr_pvalue", 0.0)
-    applied = apply_lesson_scoring("memory", scoring, dsr_pvalue=dsr)
+    applied = apply_lesson_scoring("memory", scoring, dsr_pvalue=dsr,
+                                   cycle_no=args.cycle)
     print(json.dumps({"cycle": args.cycle, "appended": len(ids), "lesson_ids": ids,
                       "lesson_scoring": applied, "dsr_pvalue": dsr}, default=str))
 

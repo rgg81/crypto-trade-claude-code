@@ -28,6 +28,11 @@ class Lesson(BaseModel):
     state: LessonState = "candidate"
     confirmations: int = 0
     provenance: list[str] = Field(default_factory=list)  # journal decision ids
+    # Cycles whose lesson_scoring has ALREADY been applied to this lesson — the per-cycle
+    # idempotency ledger (cy328). Legacy lessons without the field default to empty and are
+    # unaffected. Doubles as an audit trail of WHEN each confirmation was earned.
+    confirmed_cycles: list[int] = Field(default_factory=list)
+    demoted_cycles: list[int] = Field(default_factory=list)
 
 
 def _store(memory_dir) -> Path:
@@ -248,22 +253,65 @@ def _scoring_ids(scoring: dict, key: str) -> list[str]:
     return out
 
 
-def apply_lesson_scoring(memory_dir, scoring: dict | None, *, dsr_pvalue: float) -> dict:
+def _already_scored(memory_dir, lesson_id: str, cycle_no, field: str) -> bool:
+    """True when this cycle's scoring for `lesson_id` has already been applied (per-cycle guard)."""
+    if cycle_no is None:
+        return False
+    for lz in read_lessons(memory_dir):
+        if lz.id == lesson_id:
+            return cycle_no in (getattr(lz, field, None) or [])
+    return False
+
+
+def _stamp_cycle(memory_dir, lesson_id: str, cycle_no, field: str) -> None:
+    """Append `cycle_no` to the lesson's applied-cycles ledger (no-op without a cycle)."""
+    if cycle_no is None:
+        return
+    for lz in read_lessons(memory_dir):
+        if lz.id == lesson_id:
+            seen = list(getattr(lz, field, None) or [])
+            if cycle_no not in seen:
+                update_lesson(memory_dir, lesson_id, **{field: [*seen, cycle_no]})
+            return
+
+
+def apply_lesson_scoring(memory_dir, scoring: dict | None, *, dsr_pvalue: float,
+                         cycle_no: int | None = None) -> dict:
     """Apply the Reflector's per-cycle lesson-confirmation scoring deterministically (#255). For
     each `confirm` id, run the DSR-gated `statistically_promote` (a confirmation always counts; a
     candidate graduates to VALIDATED only at count>=5 AND dsr_pvalue>=0.95). For each `demote` id,
-    run `demote_lesson`. Replaces the orchestrator hand-running promote_lesson_cli per id. Unknown
-    ids are reported in `not_found`. An empty/None scoring block is a safe no-op."""
-    result: dict[str, list[str]] = {"confirmed": [], "demoted": [], "not_found": []}
+    run `demote_lesson`. Unknown ids go to `not_found`. Empty/None scoring is a safe no-op.
+
+    IDEMPOTENT PER CYCLE when `cycle_no` is given (cy328). `record_lessons` dedupes lessons BY TEXT,
+    so re-running the merge was believed safe — but `lesson_scoring` had no equivalent guard, and
+    an
+    orchestrator re-run of `record_lessons_cli` for the same cycle incremented the SAME confirmation
+    a second time. It happened for real: migrating-pivot lesson 96a4a4b7 reached confirmations=2 on
+    one genuine validation. That is not cosmetic — FIVE confirmations graduate a CANDIDATE to
+    VALIDATED, validated lessons are never dropped by the retrieval polarity quota, and a
+    demote
+    steps state and zeroes the count. So a retry could manufacture a standing rule the evidence
+    never
+    earned, or retire a lesson twice over. Each lesson now records which cycles have already scored
+    it; a repeat is skipped and reported under `already_applied`. Omitting `cycle_no` preserves the
+    old unguarded behaviour for callers that have no cycle context."""
+    result: dict[str, list[str]] = {"confirmed": [], "demoted": [], "not_found": [],
+                                    "already_applied": []}
     if not scoring:
         return result
     for lid in _scoring_ids(scoring, "confirm"):
-        if statistically_promote(memory_dir, lid, dsr_pvalue=dsr_pvalue):
+        if _already_scored(memory_dir, lid, cycle_no, "confirmed_cycles"):
+            result["already_applied"].append(lid)
+        elif statistically_promote(memory_dir, lid, dsr_pvalue=dsr_pvalue):
+            _stamp_cycle(memory_dir, lid, cycle_no, "confirmed_cycles")
             result["confirmed"].append(lid)
         elif lid not in result["not_found"]:
             result["not_found"].append(lid)
     for lid in _scoring_ids(scoring, "demote"):
-        if demote_lesson(memory_dir, lid):
+        if _already_scored(memory_dir, lid, cycle_no, "demoted_cycles"):
+            result["already_applied"].append(lid)
+        elif demote_lesson(memory_dir, lid):
+            _stamp_cycle(memory_dir, lid, cycle_no, "demoted_cycles")
             result["demoted"].append(lid)
         elif lid not in result["not_found"]:
             result["not_found"].append(lid)

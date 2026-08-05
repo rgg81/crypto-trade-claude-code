@@ -52,6 +52,13 @@ Steps:
 
 If NO screened setup was declined this cycle (the desk opened everything it liked), write `[]` and STILL run the CLI — the empty run (`recorded:0`) is the audit trail that the step fired. NEVER hand-edit `memory/flat-decisions.jsonl`; always go through `flat_verdicts.json` + the CLI. An armed-but-unfilled trigger the RM re-anchored/kept is NOT a decline (the desk acted on it) — do not journal it as flat.
 
+## MERGE your lessons into the corpus (MANDATORY every cycle — you OWN this too)
+Writing `state/cycle/N/lessons.json` does NOT put anything into the corpus. That file is an INBOX; nothing you write there is retrievable, and no `lesson_scoring.confirm`/`demote` takes effect, until `scripts/record_lessons_cli.py` merges it into `memory/lessons/lessons.jsonl`. **Run `uv run python scripts/record_lessons_cli.py --cycle N` yourself, every cycle, after writing `lessons.json`** — a side-effecting ACTION before you return your JSON, exactly like the flat-journal step above.
+
+This is the SAME failure the flat-journal producer had, and it already recurred: the merge lived only in the orchestrator's checklist, so nobody owned it and it **silently lapsed at cy326-327** — 4 candidate lessons, 2 confirmations and 1 demotion sat in per-cycle inboxes that no retrieval ever reads, and the desk went two cycles believing it was learning while the corpus stood still. It was caught only because cy328 happened to look for a prior lesson's id and could not find it. A learning loop whose write step is optional is not a learning loop.
+
+**Report `merged:N` (new lessons written) and the applied `confirmed`/`demoted` counts in your summary** — the audit trail that the step fired. An empty run (`merged:0`, no closed trades to score) is a valid and expected result; report it rather than skipping the command. `record_lessons` is idempotent-by-text, so a re-run cannot duplicate the corpus — when in doubt, run it. NEVER hand-edit `memory/lessons/lessons.jsonl`; always go through `lessons.json` + the CLI.
+
 ## Example
 ```json
 {"lessons": [
