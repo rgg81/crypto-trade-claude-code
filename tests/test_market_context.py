@@ -132,3 +132,19 @@ def test_availability_helpers_are_failsafe_on_junk():
     for junk in (None, {}, {"posts": []}, {"posts": ["not-a-dict"]}):
         assert social_engagement_degraded(junk) is False
         assert social_engagement_available(junk) is False
+
+
+def test_market_context_carries_macro_observation_dates():
+    """cy327: a bare macro value cannot distinguish 'unchanged' from 'stale' — carry the date."""
+    mc = build_market_context(_Client(), _settings(), fred_key="k" * 32)
+    assert mc["macro"]["DGS10"] == 4.48
+    assert mc["macro_asof"]["DGS10"] == "2026-05-27"
+    # keys stay in lockstep so a reader can always date any value it can see
+    assert set(mc["macro_asof"]) == set(mc["macro"])
+
+
+def test_market_context_macro_asof_present_even_when_feed_is_down():
+    """A missing FRED key degrades to empty dicts, not a MISSING key — no consumer may KeyError."""
+    mc = build_market_context(_Client(), _settings(), fred_key=None)
+    assert mc["macro"] == {} and mc["macro_asof"] == {}
+    assert any("macro" in w.lower() for w in mc["warnings"])

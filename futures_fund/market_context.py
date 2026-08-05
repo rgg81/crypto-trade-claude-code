@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 from futures_fund.config import Settings
-from futures_fund.vendors import fetch_fear_greed, fetch_macro, fetch_news, fetch_reddit
+from futures_fund.vendors import (
+    fetch_fear_greed,
+    fetch_macro_dated,
+    fetch_news,
+    fetch_reddit,
+)
 
 _FRED_SERIES_LABELS = {"DTWEXBGS": "broad_dollar", "DGS10": "ust_10y",
                        "FEDFUNDS": "fed_funds", "CPIAUCSL": "cpi"}
@@ -86,7 +91,10 @@ def build_market_context(http_client, settings: Settings, fred_key: str | None) 
         news = []
         warnings.append("news feed unavailable — cap conviction on catalysts")
 
-    macro = fetch_macro(http_client, list(settings.data.fred_series), fred_key)
+    # Carry each series' OBSERVATION DATE alongside its value (cy327). A bare number cannot say
+    # whether it is fresh, so an analyst comparing cycles has no way to tell "unchanged because
+    # this series is monthly" from "unchanged because the feed is stuck" — see fetch_macro_dated.
+    macro, macro_asof = fetch_macro_dated(http_client, list(settings.data.fred_series), fred_key)
     if not macro:
         warnings.append("macro feed (FRED) unavailable — no DXY/yields/Fed read")
 
@@ -107,4 +115,5 @@ def build_market_context(http_client, settings: Settings, fred_key: str | None) 
         warnings.append("social feed (reddit) unavailable — cap social-sentiment read")
 
     return {"fear_greed": fear_greed, "news": news, "macro": macro, "social": social,
-            "macro_labels": _FRED_SERIES_LABELS, "warnings": warnings}
+            "macro_asof": macro_asof, "macro_labels": _FRED_SERIES_LABELS,
+            "warnings": warnings}

@@ -6,6 +6,7 @@ from futures_fund.vendors import (
     archive_jsonl,
     fetch_fear_greed,
     fetch_macro,
+    fetch_macro_dated,
     fetch_news,
     parse_fear_greed,
     parse_fred,
@@ -102,6 +103,34 @@ def test_fetch_macro_returns_latest_values():
 
 def test_fetch_macro_without_key_is_empty():
     assert fetch_macro(_NewsClient({}), series=["DGS10"], api_key=None) == {}
+
+
+def test_fetch_macro_asof_reports_the_observation_date():
+    """cy327: the value alone cannot tell 'unchanged' from 'stale'. Carry the date too."""
+    obs = {"observations": [{"date": "2026-05-26", "value": "4.47"},
+                            {"date": "2026-05-27", "value": "4.48"}]}
+    c = _NewsClient({"https://api.stlouisfed.org/fred/series/observations": _Resp(payload=obs)})
+    macro, asof = fetch_macro_dated(c, series=["DGS10"], api_key="k" * 32)
+    assert macro["DGS10"] == 4.48
+    assert asof["DGS10"] == "2026-05-27"  # the date OF the value returned, not "now"
+
+
+def test_fetch_macro_dated_without_key_is_two_empties():
+    assert fetch_macro_dated(_NewsClient({}), series=["DGS10"], api_key=None) == ({}, {})
+
+
+def test_fetch_macro_dated_skips_a_series_that_errors_without_losing_the_others():
+    obs = {"observations": [{"date": "2026-05-27", "value": "4.48"}]}
+    c = _NewsClient({"https://api.stlouisfed.org/fred/series/observations": _Resp(payload=obs)})
+    macro, asof = fetch_macro_dated(c, series=["DGS10"], api_key="k" * 32)
+    assert set(macro) == set(asof) == {"DGS10"}  # keys stay in lockstep
+
+
+def test_fetch_macro_still_returns_the_bare_value_mapping():
+    """The legacy value-only contract must not change shape — consumers depend on it."""
+    obs = {"observations": [{"date": "2026-05-27", "value": "4.48"}]}
+    c = _NewsClient({"https://api.stlouisfed.org/fred/series/observations": _Resp(payload=obs)})
+    assert fetch_macro(c, series=["DGS10"], api_key="k" * 32) == {"DGS10": 4.48}
 
 
 class FakeResp:

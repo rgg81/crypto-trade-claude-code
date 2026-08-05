@@ -257,8 +257,6 @@ def _posts_for_sub(client, sub: str, symbols: list[str], per_sub: int,
             st["json_dead"] = True
         except Exception:
             st["json_dead"] = True
-        except Exception:
-            _reddit_json_failures += 1
     try:
         r = client.get(f"https://www.reddit.com/r/{sub}/.rss", headers={"User-Agent": _REDDIT_UA})
         r.raise_for_status()
@@ -319,11 +317,29 @@ def fetch_reddit(client, subreddits: list[str], symbols: list[str], per_sub: int
             "empty_subreddits": empty}
 
 
-def fetch_macro(client, series: list[str], api_key: str | None) -> dict[str, float]:
-    """Latest value per FRED series (DXY/yields/Fed/CPI). Empty dict if no key (graceful)."""
+def fetch_macro_dated(client, series: list[str],
+                      api_key: str | None) -> tuple[dict[str, float], dict[str, str]]:
+    """Latest (value, observation DATE) per FRED series. Two empty dicts if no key (graceful).
+
+    cy327: `fetch_macro` returned the value and THREW THE DATE AWAY, so nothing downstream could
+    tell a legitimately-unchanged series from a stale one. The cost was concrete: the Sentiment
+    analyst spent three consecutive cycles (325-327) reasoning about whether the dollar had moved,
+    reporting DTWEXBGS as "bit-for-bit identical 119.7034 for a FIFTH straight cycle" and finally
+    calling it a frozen feed — a conclusion it had no way to check, because the desk polls every 8h
+    while these series update at wildly different cadences. DTWEXBGS/DGS10 are DAILY with a
+    publication lag (repeating within a day is correct); FEDFUNDS and CPIAUCSL are MONTHLY (a
+    constant reading across cycles hours apart is not just expected, it is the only possible
+    answer). Without the date, "unchanged" is indistinguishable from "broken", and an analyst must
+    either invent a staleness verdict or ignore the series — both are wrong.
+
+    The date is the discriminator: it lets a reader say "CPI is 3 weeks old because CPI is monthly"
+    versus "the daily dollar index has not printed in 10 days, something is wrong." Returned
+    alongside rather than replacing the value mapping so `fetch_macro`'s contract is untouched.
+    Keys stay in LOCKSTEP between the two dicts — a series that errors appears in neither."""
     if not api_key:
-        return {}
-    out: dict[str, float] = {}
+        return {}, {}
+    values: dict[str, float] = {}
+    asof: dict[str, str] = {}
     for sid in series:
         try:
             r = client.get(FRED_URL, params={"series_id": sid, "api_key": api_key,
@@ -333,10 +349,19 @@ def fetch_macro(client, series: list[str], api_key: str | None) -> dict[str, flo
             # pick the latest observation by ISO date — order-independent (don't trust API order)
             vals = parse_fred(r.json())  # [(date, value)], skips "."
             if vals:
-                out[sid] = max(vals, key=lambda dv: dv[0])[1]
+                date, value = max(vals, key=lambda dv: dv[0])
+                values[sid] = value
+                asof[sid] = date
         except Exception:
             continue
-    return out
+    return values, asof
+
+
+def fetch_macro(client, series: list[str], api_key: str | None) -> dict[str, float]:
+    """Latest value per FRED series (DXY/yields/Fed/CPI). Empty dict if no key (graceful).
+
+    Value-only view of `fetch_macro_dated` — kept as-is for consumers that only need the number."""
+    return fetch_macro_dated(client, series, api_key)[0]
 
 
 def parse_fred(payload: dict) -> list[tuple[str, float]]:
